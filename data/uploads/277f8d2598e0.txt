@@ -1,0 +1,22 @@
+Priya Nair
+San Francisco, CA
+priya.nair@example.com | +1 (415) 555-0148
+linkedin.com/in/priyanair | github.com/priyanair
+
+Software Engineer with 6 years of experience building Python and TypeScript services, data pipelines, and LLM-backed products.
+
+EXPERIENCE
+Senior Software Engineer, Northwind Labs — 2022–2026
+- Designed FastAPI services and React dashboards used by 40k monthly users.
+- Shipped a retrieval-augmented search feature with OpenAI, PostgreSQL, and Redis.
+- Led migrations to AWS (ECS, S3, RDS) and GitHub Actions CI/CD.
+
+Software Engineer, Harbor Analytics — 2020–2022
+- Built ETL jobs in Python/Pandas and SQL for marketplace reporting.
+- Reduced dashboard query time 55% with indexing and caching.
+
+SKILLS
+Python, TypeScript, JavaScript, React, FastAPI, Django, PostgreSQL, Redis, Docker, Kubernetes, AWS, Git, pytest, LLM, RAG, pandas
+
+EDUCATION
+B.S. Computer Science, UC San Diego
