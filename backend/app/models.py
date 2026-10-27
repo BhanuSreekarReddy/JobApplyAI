@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, Integer, String, Text
+from sqlalchemy import DateTime, Float, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -14,6 +14,7 @@ class Run(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     locations: Mapped[str] = mapped_column(Text, default="")
     auto_apply: Mapped[int] = mapped_column(Integer, default=1)
+    browser_fill: Mapped[int] = mapped_column(Integer, default=0)
     min_score: Mapped[float] = mapped_column(Float, default=70.0)
     max_applications: Mapped[int] = mapped_column(Integer, default=8)
     resume_path: Mapped[str] = mapped_column(String, default="")
@@ -54,4 +55,23 @@ class Application(Base):
     cover_letter: Mapped[str] = mapped_column(Text, default="")
     notes: Mapped[str] = mapped_column(Text, default="")
     apply_url: Mapped[str] = mapped_column(String, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class Company(Base):
+    """A company whose public ATS job board is searched on every run."""
+
+    __tablename__ = "companies"
+    __table_args__ = (UniqueConstraint("ats", "slug", name="uq_company_board"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String, default="")
+    ats: Mapped[str] = mapped_column(String, default="")
+    slug: Mapped[str] = mapped_column(String, default="")
+    source: Mapped[str] = mapped_column(String, default="user")  # starter | user
+    enabled: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String, default="unchecked")  # ok | not_found | error | unchecked
+    job_count: Mapped[int] = mapped_column(Integer, default=0)
+    note: Mapped[str] = mapped_column(Text, default="")
+    last_checked: Mapped[datetime] = mapped_column(DateTime, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

@@ -1,11 +1,13 @@
+import os
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parents[2]
-DATA_DIR = ROOT / "data"
+DATA_DIR = Path(os.environ.get("JOBAPPLY_DATA_DIR") or ROOT / "data")
 UPLOAD_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "jobapply.db"
+BROWSER_PROFILE_DIR = DATA_DIR / "browser-profile"
 
 
 class Settings(BaseSettings):
@@ -22,6 +24,7 @@ class Settings(BaseSettings):
     smtp_from: str = ""
     usajobs_api_key: str = ""
     usajobs_user_agent: str = "JobApply/1.0"
+    formfill_headless: bool = False
 
 
 settings = Settings()

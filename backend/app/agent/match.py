@@ -3,6 +3,14 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .locations import Wanted, match_location
+
+LOCATION_POINTS = {"city": 25.0, "state": 22.0, "remote": 22.0, "country": 18.0, "any": 10.0}
+ENTRY_LEVEL_RE = re.compile(
+    r"\b(intern(ship)?|new grad(uate)?|graduate|entry[- ]level|junior|jr|apprentice|co-?op|university|campus|early career)\b"
+    r"|\b20\d\d (grad|start)",
+)
+
 
 def _tokens(text: str) -> set[str]:
     return {t for t in re.findall(r"[a-z0-9+#.]{2,}", text.lower()) if len(t) > 1}
@@ -18,7 +26,7 @@ def _seniority(years: int) -> set[str]:
     return {"staff", "principal", "lead", "senior", "staff"}
 
 
-def score_job(job: dict[str, Any], profile: dict[str, Any], locations: list[str]) -> tuple[float, list[str]]:
+def score_job(job: dict[str, Any], profile: dict[str, Any], wanted: Wanted) -> tuple[float, list[str]]:
     blob = f"{job.get('title','')} {job.get('description','')} {job.get('location','')}".lower()
     job_tokens = _tokens(blob)
     skills = [s.lower() for s in profile.get("skills") or []]
@@ -42,44 +50,37 @@ def score_job(job: dict[str, Any], profile: dict[str, Any], locations: list[str]
         if overlap:
             title_score = max(title_score, 14.0)
 
-    loc_score = 0.0
-    job_loc = (job.get("location") or "").lower()
-    remote = bool(job.get("remote")) or "remote" in job_loc or "worldwide" in job_loc
-    wanted = [l.lower() for l in locations]
-    wants_remote = any("remote" in l or "anywhere" in l for l in wanted)
-    if remote and (wants_remote or wanted):
-        loc_score = 22.0 if wants_remote or remote else 16.0
-        reasons.append("Remote-friendly")
-    for loc in wanted:
-        city = loc.split(",")[0].strip()
-        if city and city in job_loc:
-            loc_score = 25.0
-            reasons.append(f"Location: {job.get('location')}")
-            break
-    if not wanted:
-        loc_score = 10.0
+    kind = job.get("location_match")
+    reason = job.get("location_reason") or ""
+    if kind is None:
+        kind, reason = match_location(job.get("location") or "", bool(job.get("remote")), wanted)
+    loc_score = LOCATION_POINTS.get(kind, 0.0)
+    if reason:
+        reasons.append(reason)
 
     sen_score = 8.0
+    penalty = 0.0
     tags = _seniority(years)
-    if any(tag in title_text.split() for tag in tags):
+    if any(tag in re.findall(r"[a-z]+", title_text) for tag in tags):
         sen_score = 15.0
         reasons.append("Seniority looks like a fit")
-    if years <= 2 and any(x in title_text for x in ("staff", "principal", "director")):
-        sen_score = 0.0
+    if years <= 2 and re.search(r"\b(staff|principal|director|head of|vp)\b", title_text):
+        sen_score, penalty = 0.0, 25.0
         reasons.append("Likely too senior")
-    if years >= 8 and any(x in title_text for x in ("intern", "junior", "entry")):
-        sen_score = 2.0
+    if years >= 3 and ENTRY_LEVEL_RE.search(title_text):
+        sen_score, penalty = 0.0, 35.0
+        reasons.append("Entry-level role; below your experience")
 
-    score = min(99.0, skill_score + title_score + loc_score + sen_score)
+    score = max(0.0, min(99.0, skill_score + title_score + loc_score + sen_score) - penalty)
     if not reasons:
         reasons.append("Partial keyword overlap")
     return round(score, 1), reasons
 
 
-def rank_jobs(jobs: list[dict[str, Any]], profile: dict[str, Any], locations: list[str]) -> list[dict[str, Any]]:
+def rank_jobs(jobs: list[dict[str, Any]], profile: dict[str, Any], wanted: Wanted) -> list[dict[str, Any]]:
     ranked = []
     for job in jobs:
-        score, reasons = score_job(job, profile, locations)
+        score, reasons = score_job(job, profile, wanted)
         ranked.append({**job, "score": score, "reasons": reasons})
-    ranked.sort(key=lambda j: j["score"], reverse=True)
+    ranked.sort(key=lambda j: (j["score"], j.get("relevance", 0.0), j.get("posted") or ""), reverse=True)
     return ranked

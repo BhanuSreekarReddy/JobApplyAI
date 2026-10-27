@@ -1,0 +1,9 @@
+.venv/
+node_modules/
+__pycache__/
+.env
+# Personal data: resumes, application database, browser cookies/sessions
+data/browser-profile/
+data/uploads/
+data/jobapply.db
+data/jobapply.db-journal
