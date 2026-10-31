@@ -34,6 +34,26 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="JobApply Agent", lifespan=lifespan)
+
+
+def _migrate_application_tracker_columns() -> None:
+    """SQLite create_all does not add columns to an existing database, so add
+    the tracker columns to databases created before this change."""
+    from sqlalchemy import text
+
+    with engine.begin() as conn:
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(applications)"))}
+        for name, ddl in [
+            ("pipeline_stage", "ALTER TABLE applications ADD COLUMN pipeline_stage VARCHAR DEFAULT 'applied'"),
+            ("user_notes", "ALTER TABLE applications ADD COLUMN user_notes TEXT DEFAULT ''"),
+            ("follow_up_date", "ALTER TABLE applications ADD COLUMN follow_up_date VARCHAR DEFAULT ''"),
+        ]:
+            if name not in cols:
+                conn.execute(text(ddl))
+
+
+_migrate_application_tracker_columns()
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -384,5 +404,44 @@ async def apply_from_link(body: JobLink):
         db.commit()
         db.refresh(application)
         return {"job": _job_payload(row), "application": _app_payload(application)}
+    finally:
+        db.close()
+
+
+PIPELINE_STAGES = {"applied", "reply", "screen", "interview", "offer", "rejected", "ghosted"}
+
+
+class TrackerUpdate(BaseModel):
+    pipeline_stage: str | None = None
+    user_notes: str | None = None
+    follow_up_date: str | None = None
+
+
+@app.patch("/api/applications/{app_id}/tracker")
+def update_tracker(app_id: int, update: TrackerUpdate):
+    """Edit an application's pipeline stage, personal notes, or follow-up date."""
+    from datetime import datetime as _datetime
+
+    db = SessionLocal()
+    try:
+        app = db.get(Application, app_id)
+        if not app:
+            raise HTTPException(404, "Application not found")
+        if update.pipeline_stage is not None:
+            if update.pipeline_stage not in PIPELINE_STAGES:
+                raise HTTPException(400, f"Unknown pipeline stage: {update.pipeline_stage}")
+            app.pipeline_stage = update.pipeline_stage
+        if update.user_notes is not None:
+            app.user_notes = update.user_notes
+        if update.follow_up_date is not None:
+            if update.follow_up_date:
+                try:
+                    _datetime.strptime(update.follow_up_date, "%Y-%m-%d")
+                except ValueError:
+                    raise HTTPException(400, "follow_up_date must be YYYY-MM-DD")
+            app.follow_up_date = update.follow_up_date
+        db.commit()
+        db.refresh(app)
+        return _app_payload(app)
     finally:
         db.close()

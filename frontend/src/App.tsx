@@ -34,7 +34,26 @@ type Application = {
   notes: string;
   apply_url: string;
   cover_letter: string;
+  pipeline_stage: string;
+  user_notes: string;
+  follow_up_date: string;
+  created_at: string | null;
 };
+
+const STAGES: { value: string; label: string }[] = [
+  { value: "applied", label: "Applied" },
+  { value: "reply", label: "Recruiter reply" },
+  { value: "screen", label: "Screen" },
+  { value: "interview", label: "Interview" },
+  { value: "offer", label: "Offer" },
+  { value: "rejected", label: "Rejected" },
+  { value: "ghosted", label: "Ghosted" },
+];
+
+function needsFollowUp(app: Application): boolean {
+  if (app.pipeline_stage !== "applied" || !app.created_at) return false;
+  return Date.now() - new Date(app.created_at).getTime() > 7 * 24 * 60 * 60 * 1000;
+}
 
 type Run = {
   id: string;
@@ -61,6 +80,9 @@ export default function App() {
   const [openCover, setOpenCover] = useState<number | null>(null);
   const [history, setHistory] = useState<Application[]>([]);
   const [working, setWorking] = useState<number | null>(null);
+  const [trackerDrafts, setTrackerDrafts] = useState<
+    Record<number, { stage: string; user_notes: string; follow_up_date: string }>
+  >({});
 
   const profile = run?.profile;
 
@@ -167,8 +189,35 @@ export default function App() {
 
   async function loadTracker() {
     setTab("tracker");
-    const rows = await fetch("/api/applications").then((r) => r.json());
+    const rows: Application[] = await fetch("/api/applications").then((r) => r.json());
     setHistory(rows);
+    setTrackerDrafts(
+      Object.fromEntries(
+        rows.map((a) => [
+          a.id,
+          {
+            stage: a.pipeline_stage || "applied",
+            user_notes: a.user_notes || "",
+            follow_up_date: a.follow_up_date || "",
+          },
+        ]),
+      ),
+    );
+  }
+
+  async function saveTracker(id: number) {
+    const draft = trackerDrafts[id];
+    if (!draft) return;
+    await fetch(`/api/applications/${id}/tracker`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pipeline_stage: draft.stage,
+        user_notes: draft.user_notes,
+        follow_up_date: draft.follow_up_date,
+      }),
+    });
+    void loadTracker();
   }
 
   return (
@@ -357,25 +406,75 @@ export default function App() {
             {history.length === 0 ? (
               <p className="empty">No applications yet.</p>
             ) : (
-              history.map((app) => (
-                <article className="job" key={app.id}>
-                  <header>
-                    <h3>
-                      {app.title} · {app.company}
-                    </h3>
-                    <span className={`status ${app.status}`}>{app.status}</span>
-                  </header>
-                  <p className="meta">
-                    {app.channel} — {app.notes}
-                  </p>
-                  {app.apply_url ? (
-                    <a href={app.apply_url} target="_blank" rel="noreferrer">
-                      Apply URL
-                    </a>
-                  ) : null}
-                  <div>{appButtons(app)}</div>
-                </article>
-              ))
+              history.map((app) => {
+                const draft = trackerDrafts[app.id] ?? {
+                  stage: app.pipeline_stage || "applied",
+                  user_notes: app.user_notes || "",
+                  follow_up_date: app.follow_up_date || "",
+                };
+                const setDraft = (patch: Partial<typeof draft>) =>
+                  setTrackerDrafts((d) => ({ ...d, [app.id]: { ...draft, ...patch } }));
+                return (
+                  <article className="job" key={app.id}>
+                    <header>
+                      <h3>
+                        {app.title} · {app.company}
+                      </h3>
+                      <span className={`status ${app.status}`}>{app.status}</span>
+                    </header>
+                    <p className="meta">
+                      {app.channel} — {app.notes}
+                    </p>
+                    {needsFollowUp(app) ? (
+                      <p className="meta">Needs follow-up: in Applied for over 7 days with no reply.</p>
+                    ) : null}
+                    {app.follow_up_date ? (
+                      <p className="meta">Follow up on {app.follow_up_date}</p>
+                    ) : null}
+                    {app.apply_url ? (
+                      <a href={app.apply_url} target="_blank" rel="noreferrer">
+                        Apply URL
+                      </a>
+                    ) : null}
+                    <div className="row" style={{ marginTop: 8 }}>
+                      <div>
+                        <label>Stage</label>
+                        <select
+                          value={draft.stage}
+                          onChange={(e) => setDraft({ stage: e.target.value })}
+                        >
+                          {STAGES.map((s) => (
+                            <option key={s.value} value={s.value}>
+                              {s.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label>Follow-up date</label>
+                        <input
+                          type="date"
+                          value={draft.follow_up_date}
+                          onChange={(e) => setDraft({ follow_up_date: e.target.value })}
+                        />
+                      </div>
+                    </div>
+                    <div style={{ marginTop: 8 }}>
+                      <label>Notes</label>
+                      <textarea
+                        rows={3}
+                        style={{ width: "100%" }}
+                        value={draft.user_notes}
+                        onChange={(e) => setDraft({ user_notes: e.target.value })}
+                      />
+                    </div>
+                    <button className="ghost" onClick={() => void saveTracker(app.id)}>
+                      Save
+                    </button>
+                    <div>{appButtons(app)}</div>
+                  </article>
+                );
+              })
             )}
           </div>
         </section>
