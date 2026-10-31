@@ -144,11 +144,19 @@ def get_run(run_id: str):
         except json.JSONDecodeError:
             profile = {}
         # A match is new when no earlier run surfaced the same normalized
-        # title + company. Comparison uses existing tables only.
-        prior_keys = {
-            _match_key(r.title, r.company)
-            for r in db.query(JobMatch).filter(JobMatch.run_id != run_id).all()
-        }
+        # title + company. Comparison uses existing tables only, and only
+        # runs created before this one count as earlier.
+        prior_keys: set[str] = set()
+        if run.created_at is not None:
+            earlier_ids = [
+                r.id
+                for r in db.query(Run).filter(Run.created_at < run.created_at).all()
+            ]
+            if earlier_ids:
+                prior_keys = {
+                    _match_key(r.title, r.company)
+                    for r in db.query(JobMatch).filter(JobMatch.run_id.in_(earlier_ids)).all()
+                }
         job_payloads = []
         for j in jobs:
             payload = _job_payload(j)
