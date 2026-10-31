@@ -40,6 +40,7 @@ class JobMatch(Base):
     score: Mapped[float] = mapped_column(Float, default=0)
     reasons: Mapped[str] = mapped_column(Text, default="")
     remote: Mapped[int] = mapped_column(Integer, default=0)
+    posted_date: Mapped[str] = mapped_column(String, default="")
 
 
 class Application(Base):
