@@ -16,6 +16,7 @@ from .materials import cover_letter
 from .profile import enhance_with_llm, heuristic_profile
 from .resume import extract_text
 from .search import search_jobs
+from .seen import is_seen
 
 
 async def execute_run(db: Session, run: Run) -> None:
@@ -86,6 +87,22 @@ async def execute_run(db: Session, run: Run) -> None:
             keep = ranked[:8]
             await events.publish(run_id, {"type": "status", "message": "No high-confidence matches; keeping the closest roles."})
 
+        # Cross-run guard: drop anything already applied to or prepared in an
+        # earlier run, so a re-run never re-surfaces or re-sends it.
+        seen_count = 0
+        fresh = []
+        for job in keep:
+            if is_seen(db, job):
+                seen_count += 1
+            else:
+                fresh.append(job)
+        keep = fresh
+        if seen_count:
+            await events.publish(
+                run_id,
+                {"type": "status", "message": f"Skipped {seen_count} jobs already applied to in earlier runs."},
+            )
+
         stored: list[JobMatch] = []
         for job in keep:
             row = JobMatch(
@@ -147,6 +164,8 @@ async def execute_run(db: Session, run: Run) -> None:
         run.summary = (
             f"{len(stored)} matches. {len(targets)} applications waiting for review."
         )
+        if seen_count:
+            run.summary += f" {seen_count} previously seen jobs skipped."
         db.commit()
         await events.publish(run_id, {"type": "done", "summary": run.summary, "status": run.status})
     except Exception as exc:

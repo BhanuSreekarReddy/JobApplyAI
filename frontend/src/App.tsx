@@ -57,6 +57,15 @@ function needsFollowUp(app: Application): boolean {
   return Date.now() - new Date(app.created_at).getTime() > 7 * 24 * 60 * 60 * 1000;
 }
 
+type SeenJob = {
+  id: number;
+  title: string;
+  company: string;
+  url: string;
+  status: string;
+  created_at: string | null;
+};
+
 type Run = {
   id: string;
   status: string;
@@ -98,6 +107,7 @@ export default function App() {
   >({});
   const [runHistory, setRunHistory] = useState<RunSummary[]>([]);
   const [newOnly, setNewOnly] = useState(false);
+  const [seen, setSeen] = useState<SeenJob[]>([]);
 
   const profile = run?.profile;
 
@@ -245,6 +255,8 @@ export default function App() {
         ]),
       ),
     );
+    const seenRows = await fetch("/api/seen").then((r) => r.json());
+    setSeen(seenRows);
   }
 
   async function saveTracker(id: number) {
@@ -692,6 +704,35 @@ export default function App() {
               <p className="empty">No applications waiting for review.</p>
             ) : (
               review.map((app) => reviewCard(app))
+            )}
+          </div>
+          <h2 style={{ marginTop: 24 }}>Previously applied</h2>
+          <p className="lede">
+            Jobs already applied to or prepared in earlier runs. These are skipped automatically
+            by future runs.
+          </p>
+          <div className="jobs">
+            {seen.length === 0 ? (
+              <p className="empty">Nothing applied to yet.</p>
+            ) : (
+              seen.map((job) => (
+                <article className="job" key={job.id}>
+                  <header>
+                    <h3>
+                      {job.title} · {job.company}
+                    </h3>
+                    <span className={`status ${job.status}`}>{job.status}</span>
+                  </header>
+                  <p className="meta">
+                    {job.created_at ? `First seen ${job.created_at.slice(0, 10)}` : ""}
+                  </p>
+                  {job.url ? (
+                    <a href={job.url} target="_blank" rel="noreferrer">
+                      Posting
+                    </a>
+                  ) : null}
+                </article>
+              ))
             )}
           </div>
         </section>
