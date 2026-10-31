@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 import httpx
@@ -67,6 +67,20 @@ async def execute_run(db: Session, run: Run) -> None:
             },
         )
         ranked = rank_jobs(found.jobs, profile, wanted)
+        # Freshness: listings older than 30 days lose 15 points and are flagged.
+        # Only sources that expose a posted date participate; the rest are
+        # left unscored on freshness rather than guessed.
+        today = date.today()
+        for job in ranked:
+            posted = (job.get("posted") or "")[:10]
+            try:
+                age = (today - date.fromisoformat(posted)).days if posted else None
+            except ValueError:
+                age = None
+            if age is not None and age > 30:
+                job["score"] = max(0.0, round(job["score"] - 15.0, 1))
+                job["reasons"] = (job.get("reasons") or []) + ["Posted over 30 days ago"]
+        ranked.sort(key=lambda j: j["score"], reverse=True)
         keep = [j for j in ranked if j["score"] >= run.min_score][: max(run.max_applications * 3, 12)]
         if not keep:
             keep = ranked[:8]
@@ -88,6 +102,7 @@ async def execute_run(db: Session, run: Run) -> None:
                 score=job.get("score") or 0,
                 reasons="; ".join(job.get("reasons") or []),
                 remote=1 if job.get("remote") else 0,
+                posted_date=(job.get("posted") or "")[:10],
             )
             db.add(row)
             stored.append(row)
@@ -206,6 +221,7 @@ def _job_payload(row: JobMatch) -> dict[str, Any]:
         "score": row.score,
         "reasons": row.reasons,
         "remote": bool(row.remote),
+        "posted_date": row.posted_date or "",
         "description": (row.description or "")[:900],
     }
 

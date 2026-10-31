@@ -20,6 +20,9 @@ def upgrade_schema() -> None:
         cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(runs)")}
         if cols and "browser_fill" not in cols:
             conn.exec_driver_sql("ALTER TABLE runs ADD COLUMN browser_fill INTEGER DEFAULT 0")
+        cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(job_matches)")}
+        if cols and "posted_date" not in cols:
+            conn.exec_driver_sql("ALTER TABLE job_matches ADD COLUMN posted_date VARCHAR DEFAULT ''")
 
 
 def get_db():

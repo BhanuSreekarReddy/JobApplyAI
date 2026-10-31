@@ -23,6 +23,8 @@ type Job = {
   reasons: string;
   remote: boolean;
   description: string;
+  posted_date: string;
+  is_new: boolean;
 };
 
 type Application = {
@@ -65,8 +67,17 @@ type Run = {
   applications: Application[];
 };
 
+type RunSummary = {
+  id: string;
+  status: string;
+  locations: string;
+  summary: string;
+  error: string;
+  created_at: string | null;
+};
+
 export default function App() {
-  const [tab, setTab] = useState<"run" | "tracker" | "companies" | "review">("run");
+  const [tab, setTab] = useState<"run" | "tracker" | "companies" | "review" | "history">("run");
   const [file, setFile] = useState<File | null>(null);
   const [locations, setLocations] = useState("San Francisco, CA, Remote");
   const [email, setEmail] = useState("");
@@ -85,6 +96,8 @@ export default function App() {
   const [trackerDrafts, setTrackerDrafts] = useState<
     Record<number, { stage: string; user_notes: string; follow_up_date: string }>
   >({});
+  const [runHistory, setRunHistory] = useState<RunSummary[]>([]);
+  const [newOnly, setNewOnly] = useState(false);
 
   const profile = run?.profile;
 
@@ -139,6 +152,45 @@ export default function App() {
         </button>
       </>
     );
+
+  function watchRun(id: string) {
+    const source = new EventSource(`/api/runs/${id}/events`);
+    source.onmessage = (msg) => {
+      const event = JSON.parse(msg.data);
+      if (event.type === "status") setLogs((l) => [...l, event.message]);
+      if (event.type === "error") {
+        setLogs((l) => [...l, event.message]);
+        setBusy(false);
+        source.close();
+      }
+      if (event.type === "done") {
+        setLogs((l) => [...l, event.summary]);
+        setBusy(false);
+        source.close();
+        void refresh(id);
+        void refreshReview();
+      }
+      if (event.type === "profile" || event.type === "job" || event.type === "application") {
+        void refresh(id);
+      }
+    };
+    source.onerror = () => {
+      void (async () => {
+        const r = await fetch(`/api/runs/${id}`).catch(() => null);
+        if (r && r.status === 404) {
+          // The run is gone (e.g. the backend restarted and lost it). Stop
+          // reconnecting instead of polling a dead events stream.
+          source.close();
+          setBusy(false);
+          setLogs((l) => [
+            ...l,
+            "Run stream closed: this run is no longer on the server. Start a new run to continue.",
+          ]);
+          return;
+        }
+        void refresh(id);
+      })();
+    };
   }
 
   async function start(e: FormEvent) {
@@ -165,43 +217,7 @@ export default function App() {
       setBusy(false);
       return;
     }
-    const source = new EventSource(`/api/runs/${created.id}/events`);
-    source.onmessage = (msg) => {
-      const event = JSON.parse(msg.data);
-      if (event.type === "status") setLogs((l) => [...l, event.message]);
-      if (event.type === "error") {
-        setLogs((l) => [...l, event.message]);
-        setBusy(false);
-        source.close();
-      }
-      if (event.type === "done") {
-        setLogs((l) => [...l, event.summary]);
-        setBusy(false);
-        source.close();
-        void refresh(created.id);
-        void refreshReview();
-      }
-      if (event.type === "profile" || event.type === "job" || event.type === "application") {
-        void refresh(created.id);
-      }
-    };
-    source.onerror = () => {
-      void (async () => {
-        const r = await fetch(`/api/runs/${created.id}`).catch(() => null);
-        if (r && r.status === 404) {
-          // The run is gone (e.g. the backend restarted and lost it). Stop
-          // reconnecting instead of polling a dead events stream.
-          source.close();
-          setBusy(false);
-          setLogs((l) => [
-            ...l,
-            "Run stream closed: this run is no longer on the server. Start a new run to continue.",
-          ]);
-          return;
-        }
-        void refresh(created.id);
-      })();
-    };
+    watchRun(created.id);
   }
 
   async function refresh(id: string) {
@@ -328,6 +344,30 @@ export default function App() {
     );
   }
 
+  async function loadRunHistory() {
+    setTab("history");
+    const rows: RunSummary[] = await fetch("/api/runs").then((r) => r.json());
+    setRunHistory(rows);
+  }
+
+  async function openHistoryRun(id: string) {
+    setTab("run");
+    setBusy(false);
+    setLogs([`Opened past run ${id}`]);
+    await refresh(id);
+  }
+
+  async function rerunRun(id: string) {
+    const created: { id: string } = await fetch(`/api/runs/${id}/rerun`, {
+      method: "POST",
+    }).then((r) => r.json());
+    setTab("run");
+    setBusy(true);
+    setLogs([`Re-running with the same settings (new run ${created.id})`]);
+    setRun(null);
+    watchRun(created.id);
+  }
+
   return (
     <div className="app">
       <header className="top">
@@ -350,6 +390,9 @@ export default function App() {
           </button>
           <button className={tab === "companies" ? "active" : ""} onClick={() => setTab("companies")}>
             Companies
+          </button>
+          <button className={tab === "history" ? "active" : ""} onClick={() => void loadRunHistory()}>
+            Past runs
           </button>
         </div>
       </header>
@@ -461,22 +504,34 @@ export default function App() {
             <div className="log">
               {logs.length === 0 ? "Idle." : logs.map((line, i) => <div key={i}>› {line}</div>)}
             </div>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={newOnly}
+                onChange={(e) => setNewOnly(e.target.checked)}
+              />
+              Only matches no earlier run has shown
+            </label>
             <div className="jobs" style={{ marginTop: 16 }}>
-              {(run?.jobs || []).map((job) => (
-                <article className="job" key={job.id}>
-                  <header>
-                    <h3>{job.title}</h3>
-                    <span className="score">{job.score.toFixed(0)}</span>
-                  </header>
-                  <p className="meta">
-                    {job.company} · {job.location || (job.remote ? "Remote" : "")} · {job.source}
-                  </p>
-                  <p className="meta">{job.reasons}</p>
-                  <a href={job.apply_url || job.url} target="_blank" rel="noreferrer">
-                    Open posting
-                  </a>
-                </article>
-              ))}
+              {(run?.jobs || [])
+                .filter((job) => !newOnly || job.is_new)
+                .map((job) => (
+                  <article className="job" key={job.id}>
+                    <header>
+                      <h3>{job.title}</h3>
+                      <span className="score">{job.score.toFixed(0)}</span>
+                    </header>
+                    <p className="meta">
+                      {job.company} · {job.location || (job.remote ? "Remote" : "")} · {job.source}
+                      {job.posted_date ? ` · posted ${job.posted_date}` : ""}
+                    </p>
+                    {job.is_new ? <p className="meta">New since your last runs</p> : null}
+                    <p className="meta">{job.reasons}</p>
+                    <a href={job.apply_url || job.url} target="_blank" rel="noreferrer">
+                      Open posting
+                    </a>
+                  </article>
+                ))}
             </div>
             {(run?.applications || []).length > 0 && (
               <div className="jobs" style={{ marginTop: 18 }}>
@@ -513,6 +568,38 @@ export default function App() {
             )}
           </section>
         </div>
+      ) : tab === "history" ? (
+        <section className="card">
+          <h2>Past runs</h2>
+          <p className="lede">Reopen any past run, or re-run it with the same settings and resume.</p>
+          <div className="jobs">
+            {runHistory.length === 0 ? (
+              <p className="empty">No runs yet.</p>
+            ) : (
+              runHistory.map((r) => (
+                <article className="job" key={r.id}>
+                  <header>
+                    <h3>Run {r.id}</h3>
+                    <span className={`status ${r.status}`}>{r.status}</span>
+                  </header>
+                  <p className="meta">
+                    {r.locations}
+                    {r.created_at ? ` · ${r.created_at.slice(0, 10)}` : ""}
+                  </p>
+                  <p className="meta">{r.summary || r.error}</p>
+                  <div className="row">
+                    <button className="ghost" onClick={() => void openHistoryRun(r.id)}>
+                      Open
+                    </button>
+                    <button className="ghost" onClick={() => void rerunRun(r.id)}>
+                      Re-run
+                    </button>
+                  </div>
+                </article>
+              ))
+            )}
+          </div>
+        </section>
       ) : tab === "tracker" ? (
         <section className="card">
           <h2>Application tracker</h2>
