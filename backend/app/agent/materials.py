@@ -14,11 +14,12 @@ def cover_letter(profile: dict[str, Any], job: dict[str, Any]) -> str:
     skills = ", ".join((profile.get("skills") or [])[:6]) or "the skills in my resume"
     years = profile.get("years_experience") or "several"
     summary = (profile.get("summary") or "").strip()
+    summary_block = f"{summary}\n\n" if summary else ""
     return (
         f"Dear {job.get('company') or 'Hiring Team'},\n\n"
         f"I am applying for the {job.get('title')} role. I bring about {years} years of relevant experience "
         f"and hands-on work with {skills}.\n\n"
-        f"{summary}\n\n"
+        f"{summary_block}"
         "I would welcome the chance to contribute and am happy to share more detail.\n\n"
         f"Sincerely,\n{name}\n"
         f"{profile.get('email') or ''}\n"

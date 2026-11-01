@@ -160,6 +160,8 @@ label {
 input[type="text"],
 input[type="email"],
 input[type="number"],
+input[type="url"],
+input[type="search"],
 input[type="file"] {
   width: 100%;
   background: #0e120b;
@@ -167,6 +169,115 @@ input[type="file"] {
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 11px 12px;
+}
+
+.hint {
+  font-size: 12px;
+  margin: 6px 0 0;
+  line-height: 1.45;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.notice {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 1.45;
+  border: 1px solid var(--line);
+}
+
+.notice.ok {
+  color: var(--ok);
+  border-color: #33553a;
+}
+
+.notice.error {
+  color: var(--fail);
+  border-color: #5a2f2a;
+}
+
+.add-company {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: center;
+  margin-top: 14px;
+}
+
+.add-company .primary {
+  width: auto;
+  margin-top: 0;
+  white-space: nowrap;
+}
+
+.company-tools {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  margin: 18px 0 12px;
+}
+
+.tabs.small button {
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
+.company-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 62vh;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.company {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 10px 14px;
+  background: #12180e;
+}
+
+.company.off {
+  opacity: 0.55;
+}
+
+.company h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.company h3 a {
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.company h3 a:hover {
+  text-decoration: underline;
+}
+
+.company .meta {
+  margin: 2px 0 0;
+}
+
+.company .note {
+  color: var(--warn);
+}
+
+.company-actions {
+  display: flex;
+  gap: 8px;
 }
 
 .row {
@@ -279,8 +390,31 @@ input[type="file"] {
   color: var(--warn);
 }
 
+.status.filled {
+  color: var(--accent-2);
+}
+
+.job .ghost + .ghost {
+  margin-left: 8px;
+}
+
 .status.failed {
   color: var(--fail);
+}
+
+.status.ok {
+  color: var(--ok);
+  border-color: #33553a;
+}
+
+.status.not_found,
+.status.error {
+  color: var(--fail);
+}
+
+.status.unchecked,
+.status.off {
+  color: var(--muted);
 }
 
 .cover {
@@ -302,8 +436,17 @@ input[type="file"] {
 @media (max-width: 900px) {
   .grid,
   .row,
-  .top {
+  .top,
+  .company-tools {
     grid-template-columns: 1fr;
     display: grid;
+  }
+
+  .company {
+    grid-template-columns: 1fr auto;
+  }
+
+  .company-actions {
+    grid-column: 1 / -1;
   }
 }

@@ -1,4 +1,6 @@
 import { FormEvent, useState } from "react";
+import Companies from "./Companies";
+import JobLink from "./JobLink";
 
 type Profile = {
   name?: string;
@@ -45,20 +47,69 @@ type Run = {
 };
 
 export default function App() {
-  const [tab, setTab] = useState<"run" | "tracker">("run");
+  const [tab, setTab] = useState<"run" | "tracker" | "companies">("run");
   const [file, setFile] = useState<File | null>(null);
-  const [locations, setLocations] = useState("San Francisco, Remote");
+  const [locations, setLocations] = useState("San Francisco, CA, Remote");
   const [email, setEmail] = useState("");
   const [minScore, setMinScore] = useState(68);
   const [maxApps, setMaxApps] = useState(6);
   const [autoApply, setAutoApply] = useState(true);
+  const [browserFill, setBrowserFill] = useState(true);
   const [busy, setBusy] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [run, setRun] = useState<Run | null>(null);
   const [openCover, setOpenCover] = useState<number | null>(null);
   const [history, setHistory] = useState<Application[]>([]);
+  const [working, setWorking] = useState<number | null>(null);
 
   const profile = run?.profile;
+
+  function replaceApp(updated: Application) {
+    setRun((r) => (r ? { ...r, applications: r.applications.map((a) => (a.id === updated.id ? updated : a)) } : r));
+    setHistory((h) => h.map((a) => (a.id === updated.id ? updated : a)));
+  }
+
+  function addApp(created: Application) {
+    setRun((r) => (r ? { ...r, applications: [...r.applications, created] } : r));
+    setHistory((h) => [created, ...h]);
+  }
+
+  async function appAction(app: Application, action: "fill" | "submitted") {
+    setWorking(app.id);
+    try {
+      const res =
+        action === "fill"
+          ? await fetch(`/api/applications/${app.id}/fill`, { method: "POST" })
+          : await fetch(`/api/applications/${app.id}`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ status: "applied" }),
+            });
+      if (!res.ok) throw new Error(await res.text());
+      replaceApp(await res.json());
+    } catch (err) {
+      replaceApp({ ...app, notes: err instanceof Error ? err.message : "Request failed" });
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  function appButtons(app: Application) {
+    if (app.status === "applied") return null;
+    const pending = working === app.id;
+    return (
+      <>
+        {app.apply_url ? (
+          <button className="ghost" disabled={working !== null} onClick={() => void appAction(app, "fill")}>
+            {pending ? "Filling…" : app.status === "filled" ? "Fill again" : "Fill form in browser"}
+          </button>
+        ) : null}
+        <button className="ghost" disabled={working !== null} onClick={() => void appAction(app, "submitted")}>
+          Mark submitted
+        </button>
+      </>
+    );
+  }
 
   async function start(e: FormEvent) {
     e.preventDefault();
@@ -70,6 +121,7 @@ export default function App() {
     body.append("resume", file);
     body.append("locations", locations);
     body.append("auto_apply", String(autoApply));
+    body.append("browser_fill", String(browserFill));
     body.append("min_score", String(minScore));
     body.append("max_applications", String(maxApps));
     body.append("contact_email", email);
@@ -136,16 +188,22 @@ export default function App() {
           <button className={tab === "tracker" ? "active" : ""} onClick={() => void loadTracker()}>
             Applications
           </button>
+          <button className={tab === "companies" ? "active" : ""} onClick={() => setTab("companies")}>
+            Companies
+          </button>
         </div>
       </header>
 
+      {tab === "companies" ? <Companies /> : null}
       {tab === "run" ? (
         <div className="grid">
+          <div className="stack">
           <form className="card" onSubmit={start}>
             <h2>Brief the agent</h2>
             <p className="lede">
-              Upload a resume and the cities you will work from. The agent searches public boards,
-              ranks fits, writes cover letters, and submits when a posting accepts email.
+              Upload a resume and where you want to work. The agent searches hundreds of companies' job
+              boards plus public job sites, ranks fits, writes cover letters, and pre-fills employer
+              application forms for you to review.
             </p>
             <label>Resume</label>
             <input
@@ -159,9 +217,13 @@ export default function App() {
               type="text"
               value={locations}
               onChange={(e) => setLocations(e.target.value)}
-              placeholder="Austin, Remote, London"
+              placeholder="Austin, TX, Remote"
               required
             />
+            <p className="hint">
+              Separate places with commas and include the state (e.g. Newark, CA). Add “Remote” for remote roles
+              in your country.
+            </p>
             <label>Contact email override</label>
             <input
               type="email"
@@ -199,10 +261,21 @@ export default function App() {
               />
               Apply automatically to ranked matches (email when possible; otherwise prepare an ATS packet)
             </label>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={browserFill}
+                onChange={(e) => setBrowserFill(e.target.checked)}
+              />
+              Pre-fill employer application forms in a browser window. Nothing is submitted: you review
+              each tab, answer the highlighted questions, and click Submit yourself.
+            </label>
             <button className="primary" disabled={busy || !file}>
               {busy ? "Agent running…" : "Run agent"}
             </button>
           </form>
+          <JobLink<Application> runId={run?.id} onAdded={addApp} />
+          </div>
 
           <section className="card">
             <h2>Live run</h2>
@@ -267,6 +340,7 @@ export default function App() {
                       <button className="ghost" onClick={() => setOpenCover(openCover === app.id ? null : app.id)}>
                         {openCover === app.id ? "Hide letter" : "Cover letter"}
                       </button>
+                      {appButtons(app)}
                     </div>
                     {openCover === app.id ? <div className="cover">{app.cover_letter}</div> : null}
                   </article>
@@ -275,7 +349,7 @@ export default function App() {
             )}
           </section>
         </div>
-      ) : (
+      ) : tab === "tracker" ? (
         <section className="card">
           <h2>Application tracker</h2>
           <p className="lede">Every packet the agent prepared or sent, newest first.</p>
@@ -299,12 +373,13 @@ export default function App() {
                       Apply URL
                     </a>
                   ) : null}
+                  <div>{appButtons(app)}</div>
                 </article>
               ))
             )}
           </div>
         </section>
-      )}
+      ) : null}
     </div>
   );
 }
