@@ -19,7 +19,7 @@ from .agent.runner import execute_run, primary_location, _app_payload, _job_payl
 from .config import UPLOAD_DIR
 from .db import Base, SessionLocal, engine, upgrade_schema
 from . import events
-from .models import Application, Company, JobMatch, Run
+from .models import Application, Company, JobMatch, Run, SeenJob
 
 Base.metadata.create_all(bind=engine)
 upgrade_schema()
@@ -384,5 +384,28 @@ async def apply_from_link(body: JobLink):
         db.commit()
         db.refresh(application)
         return {"job": _job_payload(row), "application": _app_payload(application)}
+    finally:
+        db.close()
+
+
+@app.get("/api/seen")
+def list_seen_jobs():
+    """Jobs already applied to or prepared in an earlier run, newest first.
+    These are excluded from future runs by default."""
+    db = SessionLocal()
+    try:
+        rows = db.query(SeenJob).order_by(SeenJob.created_at.desc()).limit(200).all()
+        return [
+            {
+                "id": r.id,
+                "title": r.title,
+                "company": r.company,
+                "url": r.url,
+                "status": r.status,
+                "run_id": r.run_id,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
     finally:
         db.close()

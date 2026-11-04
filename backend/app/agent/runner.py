@@ -18,6 +18,7 @@ from .materials import cover_letter
 from .profile import enhance_with_llm, heuristic_profile
 from .resume import extract_text
 from .search import search_jobs
+from .seen import is_seen, record_seen
 
 
 async def execute_run(db: Session, run: Run) -> None:
@@ -73,6 +74,22 @@ async def execute_run(db: Session, run: Run) -> None:
         if not keep:
             keep = ranked[:8]
             await events.publish(run_id, {"type": "status", "message": "No high-confidence matches; keeping the closest roles."})
+
+        # Cross-run guard: drop anything already applied to or prepared in an
+        # earlier run, so a re-run never re-surfaces or re-sends it.
+        seen_count = 0
+        fresh = []
+        for job in keep:
+            if is_seen(db, job):
+                seen_count += 1
+            else:
+                fresh.append(job)
+        keep = fresh
+        if seen_count:
+            await events.publish(
+                run_id,
+                {"type": "status", "message": f"Skipped {seen_count} jobs already applied to in earlier runs."},
+            )
 
         stored: list[JobMatch] = []
         for job in keep:
@@ -142,6 +159,18 @@ async def execute_run(db: Session, run: Run) -> None:
             db.add(app)
             db.commit()
             db.refresh(app)
+            if result["status"] in {"applied", "prepared", "filled"}:
+                record_seen(
+                    db,
+                    run_id,
+                    {
+                        "external_id": row.external_id,
+                        "title": row.title,
+                        "company": row.company,
+                        "url": row.url,
+                    },
+                    result["status"],
+                )
             if result["status"] == "applied":
                 applied += 1
             elif result["status"] == "failed":
@@ -157,6 +186,8 @@ async def execute_run(db: Session, run: Run) -> None:
         run.summary = (
             f"{len(stored)} matches. {applied} submitted, {filled_note}{prepared} packets ready, {failed} failed."
         )
+        if seen_count:
+            run.summary += f" {seen_count} previously seen jobs skipped."
         db.commit()
         await events.publish(run_id, {"type": "done", "summary": run.summary, "status": run.status})
     except Exception as exc:

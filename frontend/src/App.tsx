@@ -36,6 +36,15 @@ type Application = {
   cover_letter: string;
 };
 
+type SeenJob = {
+  id: number;
+  title: string;
+  company: string;
+  url: string;
+  status: string;
+  created_at: string | null;
+};
+
 type Run = {
   id: string;
   status: string;
@@ -61,6 +70,7 @@ export default function App() {
   const [openCover, setOpenCover] = useState<number | null>(null);
   const [history, setHistory] = useState<Application[]>([]);
   const [working, setWorking] = useState<number | null>(null);
+  const [seen, setSeen] = useState<SeenJob[]>([]);
 
   const profile = run?.profile;
 
@@ -169,6 +179,8 @@ export default function App() {
     setTab("tracker");
     const rows = await fetch("/api/applications").then((r) => r.json());
     setHistory(rows);
+    const seenRows = await fetch("/api/seen").then((r) => r.json());
+    setSeen(seenRows);
   }
 
   return (
@@ -374,6 +386,35 @@ export default function App() {
                     </a>
                   ) : null}
                   <div>{appButtons(app)}</div>
+                </article>
+              ))
+            )}
+          </div>
+          <h2 style={{ marginTop: 24 }}>Previously applied</h2>
+          <p className="lede">
+            Jobs already applied to or prepared in earlier runs. These are skipped automatically
+            by future runs.
+          </p>
+          <div className="jobs">
+            {seen.length === 0 ? (
+              <p className="empty">Nothing applied to yet.</p>
+            ) : (
+              seen.map((job) => (
+                <article className="job" key={job.id}>
+                  <header>
+                    <h3>
+                      {job.title} · {job.company}
+                    </h3>
+                    <span className={`status ${job.status}`}>{job.status}</span>
+                  </header>
+                  <p className="meta">
+                    {job.created_at ? `First seen ${job.created_at.slice(0, 10)}` : ""}
+                  </p>
+                  {job.url ? (
+                    <a href={job.url} target="_blank" rel="noreferrer">
+                      Posting
+                    </a>
+                  ) : null}
                 </article>
               ))
             )}
