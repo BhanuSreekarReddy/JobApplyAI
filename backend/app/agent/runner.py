@@ -159,7 +159,7 @@ async def execute_run(db: Session, run: Run) -> None:
             db.add(app)
             db.commit()
             db.refresh(app)
-            if result["status"] in {"applied", "prepared"}:
+            if result["status"] in {"applied", "prepared", "filled"}:
                 record_seen(
                     db,
                     run_id,
