@@ -122,6 +122,7 @@ export default function App() {
         </button>
       </>
     );
+  }
 
   function watchRun(id: string) {
     const source = new EventSource(`/api/runs/${id}/events`);
