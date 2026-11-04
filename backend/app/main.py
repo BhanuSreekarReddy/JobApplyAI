@@ -201,6 +201,7 @@ def rerun_run(run_id: str, background: BackgroundTasks):
             status="queued",
             locations=original.locations,
             auto_apply=original.auto_apply,
+            browser_fill=original.browser_fill,
             min_score=original.min_score,
             max_applications=original.max_applications,
             resume_path=original.resume_path,
