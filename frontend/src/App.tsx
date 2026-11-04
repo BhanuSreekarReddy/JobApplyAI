@@ -157,18 +157,35 @@ export default function App() {
         setBusy(false);
         source.close();
         void refresh(created.id);
+        void refreshReview();
       }
       if (event.type === "profile" || event.type === "job" || event.type === "application") {
         void refresh(created.id);
       }
     };
     source.onerror = () => {
-      void refresh(created.id);
+      void (async () => {
+        const r = await fetch(`/api/runs/${created.id}`).catch(() => null);
+        if (r && r.status === 404) {
+          // The run is gone (e.g. the backend restarted and lost it). Stop
+          // reconnecting instead of polling a dead events stream.
+          source.close();
+          setBusy(false);
+          setLogs((l) => [
+            ...l,
+            "Run stream closed: this run is no longer on the server. Start a new run to continue.",
+          ]);
+          return;
+        }
+        void refresh(created.id);
+      })();
     };
   }
 
   async function refresh(id: string) {
-    const data: Run = await fetch(`/api/runs/${id}`).then((r) => r.json());
+    const res = await fetch(`/api/runs/${id}`);
+    if (!res.ok) return;
+    const data: Run = await res.json();
     setRun(data);
     if (data.status === "completed" || data.status === "failed") setBusy(false);
   }
@@ -415,7 +432,10 @@ export default function App() {
             {(run?.applications || []).length > 0 && (
               <div className="jobs" style={{ marginTop: 18 }}>
                 <h2>Packets</h2>
-                {run!.applications.map((app) => (
+                {run!.applications.map((app) =>
+                  app.status === "pending_review" ? (
+                    reviewCard(app)
+                  ) : (
                   <article className="job" key={app.id}>
                     <header>
                       <h3>

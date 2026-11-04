@@ -256,9 +256,12 @@ def list_pending_review():
 
 
 @app.post("/api/applications/{app_id}/approve")
-def approve_application(app_id: int):
+async def approve_application(app_id: int):
     """Approve a queued application. Sends it by email only when the run opted into
-    email sending and an address plus SMTP are available; otherwise marks it prepared."""
+    email sending and an address plus SMTP are available; otherwise marks it prepared.
+    When the run opted into browser form filling, approval also pre-fills the
+    employer's application form with the reviewed cover letter, exactly like a run
+    used to — approval is now the step that triggers it."""
     db = SessionLocal()
     try:
         app = db.get(Application, app_id)
@@ -288,6 +291,20 @@ def approve_application(app_id: int):
             resume_path=run.resume_path if run else "",
             auto_apply=bool(run.auto_apply) if run else False,
         )
+        if run and run.browser_fill and result["status"] == "prepared" and app.apply_url:
+            result = await fill_application(
+                profile=profile,
+                job={
+                    "title": app.title,
+                    "company": app.company,
+                    "description": job_row.description if job_row else "",
+                    "apply_url": app.apply_url,
+                },
+                cover=app.cover_letter,
+                resume_path=run.resume_path,
+                location=primary_location(run.locations),
+                packet_key=f"{run.id}-{app.job_id}",
+            )
         app.status = result["status"]
         app.channel = result["channel"]
         app.notes = result["notes"]
