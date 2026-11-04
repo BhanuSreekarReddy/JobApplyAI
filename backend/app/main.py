@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from .agent.apply import apply_to_job
 from .agent.companies import ResolveError, add_company, payload as company_payload, resolve_job_url, sync_starter
 from .agent.formfill import fill_application, shutdown_browser
 from .agent.materials import cover_letter
@@ -68,7 +69,7 @@ async def create_run(
     background: BackgroundTasks,
     resume: UploadFile = File(...),
     locations: str = Form(...),
-    auto_apply: str = Form("true"),
+    auto_apply: str = Form("false"),
     browser_fill: str = Form("false"),
     min_score: float = Form(68.0),
     max_applications: int = Form(8),
@@ -212,7 +213,8 @@ async def fill_application_form(app_id: int):
 
 
 class ApplicationUpdate(BaseModel):
-    status: Literal["applied", "filled", "prepared"]
+    status: Literal["applied", "filled", "prepared"] | None = None
+    cover_letter: str | None = None
 
 
 @app.patch("/api/applications/{app_id}")
@@ -222,12 +224,94 @@ def update_application(app_id: int, body: ApplicationUpdate):
         row = db.get(Application, app_id)
         if not row:
             raise HTTPException(404, "Application not found")
-        row.status = body.status
-        if body.status == "applied":
-            row.notes = "Submitted by you on the employer site. " + (row.notes or "")
+        if body.cover_letter is not None:
+            if row.status != "pending_review":
+                raise HTTPException(400, "Only applications waiting for review can be edited")
+            row.cover_letter = body.cover_letter
+        if body.status is not None:
+            row.status = body.status
+            if body.status == "applied":
+                row.notes = "Submitted by you on the employer site. " + (row.notes or "")
         db.commit()
         db.refresh(row)
         return _app_payload(row)
+    finally:
+        db.close()
+
+
+@app.get("/api/review")
+def list_pending_review():
+    """Applications waiting for a human approve/skip decision. Nothing here has been sent."""
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(Application)
+            .filter(Application.status == "pending_review")
+            .order_by(Application.id.asc())
+            .all()
+        )
+        return [_app_payload(a) for a in rows]
+    finally:
+        db.close()
+
+
+@app.post("/api/applications/{app_id}/approve")
+def approve_application(app_id: int):
+    """Approve a queued application. Sends it by email only when the run opted into
+    email sending and an address plus SMTP are available; otherwise marks it prepared."""
+    db = SessionLocal()
+    try:
+        app = db.get(Application, app_id)
+        if not app:
+            raise HTTPException(404, "Application not found")
+        if app.status != "pending_review":
+            raise HTTPException(400, "Only applications waiting for review can be approved")
+        run = db.get(Run, app.run_id)
+        profile = {}
+        if run:
+            try:
+                profile = json.loads(run.profile_json or "{}")
+            except json.JSONDecodeError:
+                profile = {}
+        job_row = db.get(JobMatch, app.job_id) if app.job_id else None
+        result = apply_to_job(
+            profile=profile,
+            job={
+                "title": app.title,
+                "company": app.company,
+                "location": job_row.location if job_row else "",
+                "description": job_row.description if job_row else "",
+                "apply_email": job_row.apply_email if job_row else "",
+                "apply_url": app.apply_url,
+            },
+            cover=app.cover_letter,
+            resume_path=run.resume_path if run else "",
+            auto_apply=bool(run.auto_apply) if run else False,
+        )
+        app.status = result["status"]
+        app.channel = result["channel"]
+        app.notes = result["notes"]
+        db.commit()
+        db.refresh(app)
+        return _app_payload(app)
+    finally:
+        db.close()
+
+
+@app.post("/api/applications/{app_id}/skip")
+def skip_application(app_id: int):
+    db = SessionLocal()
+    try:
+        app = db.get(Application, app_id)
+        if not app:
+            raise HTTPException(404, "Application not found")
+        if app.status != "pending_review":
+            raise HTTPException(400, "Only applications waiting for review can be skipped")
+        app.status = "skipped"
+        app.notes = "Skipped during review."
+        db.commit()
+        db.refresh(app)
+        return _app_payload(app)
     finally:
         db.close()
 

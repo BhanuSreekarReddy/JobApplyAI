@@ -9,9 +9,7 @@ from sqlalchemy.orm import Session
 
 from .. import events
 from ..models import Application, Company, JobMatch, Run
-from .apply import apply_to_job
 from .companies import enabled_boards, relocate, sync_starter
-from .formfill import fill_application
 from .locations import parse_locations
 from .match import rank_jobs
 from .materials import cover_letter
@@ -99,7 +97,6 @@ async def execute_run(db: Session, run: Run) -> None:
             await events.publish(run_id, {"type": "job", "job": _job_payload(row)})
 
         targets = stored[: run.max_applications]
-        applied = prepared = filled = failed = 0
         for row in targets:
             await events.publish(run_id, {"type": "status", "message": f"Drafting application for {row.title} at {row.company}"})
             job = {
@@ -111,51 +108,29 @@ async def execute_run(db: Session, run: Run) -> None:
                 "apply_url": row.apply_url,
             }
             letter = cover_letter(profile, job)
-            result = apply_to_job(
-                profile=profile,
-                job=job,
-                cover=letter,
-                resume_path=run.resume_path,
-                auto_apply=bool(run.auto_apply),
-            )
-            if run.browser_fill and result["status"] == "prepared" and row.apply_url:
-                await events.publish(run_id, {"type": "status", "message": f"Pre-filling the application form for {row.company} in the browser"})
-                result = await fill_application(
-                    profile=profile,
-                    job=job,
-                    cover=letter,
-                    resume_path=run.resume_path,
-                    location=primary_location(run.locations),
-                    packet_key=f"{run_id}-{row.id}",
-                )
+            # Nothing is sent from a run anymore. Every application waits in the
+            # review queue until a human approves it (see /api/review). Sending —
+            # email, packet preparation, and browser form filling — happens at
+            # approval time, not here.
             app = Application(
                 run_id=run_id,
                 job_id=row.id,
                 title=row.title,
                 company=row.company,
-                status=result["status"],
-                channel=result["channel"],
+                status="pending_review",
+                channel="review",
                 cover_letter=letter,
-                notes=result["notes"],
+                notes="Waiting for review. Approve to send it, or skip it.",
                 apply_url=row.apply_url,
             )
             db.add(app)
             db.commit()
             db.refresh(app)
-            if result["status"] == "applied":
-                applied += 1
-            elif result["status"] == "failed":
-                failed += 1
-            elif result["status"] == "filled":
-                filled += 1
-            else:
-                prepared += 1
             await events.publish(run_id, {"type": "application", "application": _app_payload(app)})
 
         run.status = "completed"
-        filled_note = f"{filled} forms pre-filled for your review, " if filled else ""
         run.summary = (
-            f"{len(stored)} matches. {applied} submitted, {filled_note}{prepared} packets ready, {failed} failed."
+            f"{len(stored)} matches. {len(targets)} applications waiting for review."
         )
         db.commit()
         await events.publish(run_id, {"type": "done", "summary": run.summary, "status": run.status})
@@ -238,6 +213,7 @@ def _job_payload(row: JobMatch) -> dict[str, Any]:
 def _app_payload(row: Application) -> dict[str, Any]:
     return {
         "id": row.id,
+        "job_id": row.job_id,
         "title": row.title,
         "company": row.company,
         "status": row.status,

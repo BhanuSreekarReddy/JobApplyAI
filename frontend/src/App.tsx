@@ -47,19 +47,21 @@ type Run = {
 };
 
 export default function App() {
-  const [tab, setTab] = useState<"run" | "tracker" | "companies">("run");
+  const [tab, setTab] = useState<"run" | "tracker" | "companies" | "review">("run");
   const [file, setFile] = useState<File | null>(null);
   const [locations, setLocations] = useState("San Francisco, CA, Remote");
   const [email, setEmail] = useState("");
   const [minScore, setMinScore] = useState(68);
   const [maxApps, setMaxApps] = useState(6);
-  const [autoApply, setAutoApply] = useState(true);
+  const [autoApply, setAutoApply] = useState(false);
   const [browserFill, setBrowserFill] = useState(true);
   const [busy, setBusy] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [run, setRun] = useState<Run | null>(null);
   const [openCover, setOpenCover] = useState<number | null>(null);
   const [history, setHistory] = useState<Application[]>([]);
+  const [review, setReview] = useState<Application[]>([]);
+  const [draftLetters, setDraftLetters] = useState<Record<number, string>>({});
   const [working, setWorking] = useState<number | null>(null);
 
   const profile = run?.profile;
@@ -96,6 +98,12 @@ export default function App() {
 
   function appButtons(app: Application) {
     if (app.status === "applied") return null;
+    if (app.status === "pending_review")
+      return (
+        <button className="ghost" onClick={() => void loadReview()}>
+          Review
+        </button>
+      );
     const pending = working === app.id;
     return (
       <>
@@ -171,6 +179,89 @@ export default function App() {
     setHistory(rows);
   }
 
+  async function refreshReview() {
+    const rows: Application[] = await fetch("/api/review").then((r) => r.json());
+    setReview(rows);
+    setDraftLetters((d) => {
+      const next = { ...d };
+      for (const a of rows) if (!(a.id in next)) next[a.id] = a.cover_letter;
+      return next;
+    });
+  }
+
+  async function loadReview() {
+    setTab("review");
+    await refreshReview();
+  }
+
+  async function approveApp(id: number) {
+    setWorking(id);
+    try {
+      const res = await fetch(`/api/applications/${id}/approve`, { method: "POST" });
+      if (res.ok) replaceApp(await res.json());
+    } finally {
+      setWorking(null);
+      void refreshReview();
+    }
+  }
+
+  async function skipApp(id: number) {
+    const res = await fetch(`/api/applications/${id}/skip`, { method: "POST" });
+    if (res.ok) replaceApp(await res.json());
+    void refreshReview();
+  }
+
+  async function saveLetter(id: number) {
+    const res = await fetch(`/api/applications/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cover_letter: draftLetters[id] ?? "" }),
+    });
+    if (res.ok) replaceApp(await res.json());
+    void refreshReview();
+  }
+
+  function reviewCard(app: Application) {
+    return (
+      <article className="job" key={app.id}>
+        <header>
+          <h3>
+            {app.title} · {app.company}
+          </h3>
+          <span className={`status ${app.status}`}>{app.status}</span>
+        </header>
+        <p className="meta">
+          {app.channel} — {app.notes}
+        </p>
+        {app.apply_url ? (
+          <a href={app.apply_url} target="_blank" rel="noreferrer">
+            Apply URL
+          </a>
+        ) : null}
+        <div style={{ marginTop: 8 }}>
+          <label>Cover letter</label>
+          <textarea
+            rows={8}
+            style={{ width: "100%" }}
+            value={draftLetters[app.id] ?? app.cover_letter}
+            onChange={(e) => setDraftLetters((d) => ({ ...d, [app.id]: e.target.value }))}
+          />
+        </div>
+        <div className="row" style={{ marginTop: 8 }}>
+          <button className="primary" disabled={working !== null} onClick={() => void approveApp(app.id)}>
+            {working === app.id ? "Approving…" : "Approve"}
+          </button>
+          <button className="ghost" onClick={() => void saveLetter(app.id)}>
+            Save letter
+          </button>
+          <button className="ghost" onClick={() => void skipApp(app.id)}>
+            Skip
+          </button>
+        </div>
+      </article>
+    );
+  }
+
   return (
     <div className="app">
       <header className="top">
@@ -187,6 +278,9 @@ export default function App() {
           </button>
           <button className={tab === "tracker" ? "active" : ""} onClick={() => void loadTracker()}>
             Applications
+          </button>
+          <button className={tab === "review" ? "active" : ""} onClick={() => void loadReview()}>
+            Review
           </button>
           <button className={tab === "companies" ? "active" : ""} onClick={() => setTab("companies")}>
             Companies
@@ -259,7 +353,8 @@ export default function App() {
                 checked={autoApply}
                 onChange={(e) => setAutoApply(e.target.checked)}
               />
-              Apply automatically to ranked matches (email when possible; otherwise prepare an ATS packet)
+              Allow approved applications to be emailed automatically (every application still
+              needs your approval first; otherwise approvals stay as prepared packets)
             </label>
             <label className="check">
               <input
@@ -376,6 +471,20 @@ export default function App() {
                   <div>{appButtons(app)}</div>
                 </article>
               ))
+            )}
+          </div>
+        </section>
+      ) : tab === "review" ? (
+        <section className="card">
+          <h2>Review queue</h2>
+          <p className="lede">
+            Nothing here has been sent. Edit a letter, approve it to send, or skip it.
+          </p>
+          <div className="jobs">
+            {review.length === 0 ? (
+              <p className="empty">No applications waiting for review.</p>
+            ) : (
+              review.map((app) => reviewCard(app))
             )}
           </div>
         </section>
