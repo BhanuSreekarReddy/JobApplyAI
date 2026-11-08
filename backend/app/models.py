@@ -80,4 +80,25 @@ class Company(Base):
     job_count: Mapped[int] = mapped_column(Integer, default=0)
     note: Mapped[str] = mapped_column(Text, default="")
     last_checked: Mapped[datetime] = mapped_column(DateTime, nullable=True, default=None)
+
+
+class SeenJob(Base):
+    """Every job an application was prepared or sent for, across all runs.
+
+    The guard against re-applying: before a run stores matches, it drops any
+    job whose normalized company + title (or exact external id) is already
+    here. Within a single run, search._dedupe already collapses cross-board
+    re-posts of the same role using the same normalization.
+    """
+
+    __tablename__ = "seen_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String, index=True)
+    external_id: Mapped[str] = mapped_column(String, default="")
+    title: Mapped[str] = mapped_column(String, default="")
+    company: Mapped[str] = mapped_column(String, default="")
+    url: Mapped[str] = mapped_column(String, default="")
+    key: Mapped[str] = mapped_column(String, index=True, default="")
+    status: Mapped[str] = mapped_column(String, default="prepared")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
