@@ -100,7 +100,7 @@ async def execute_run(db: Session, run: Run) -> None:
         if seen_count:
             await events.publish(
                 run_id,
-                {"type": "status", "message": f"Skipped {seen_count} jobs already applied to in earlier runs."},
+                {"type": "status", "message": f"Skipped {seen_count} jobs already applied to or skipped in earlier runs."},
             )
 
         stored: list[JobMatch] = []
