@@ -56,6 +56,11 @@ class Application(Base):
     notes: Mapped[str] = mapped_column(Text, default="")
     apply_url: Mapped[str] = mapped_column(String, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # Pipeline tracking, edited by the user in the tracker tab. `notes` stays
+    # as the system's note; `user_notes` is the user's own free text.
+    pipeline_stage: Mapped[str] = mapped_column(String, default="applied")
+    user_notes: Mapped[str] = mapped_column(Text, default="")
+    follow_up_date: Mapped[str] = mapped_column(String, default="")
 
 
 class Company(Base):

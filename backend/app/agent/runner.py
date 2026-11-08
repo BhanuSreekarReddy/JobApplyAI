@@ -222,4 +222,7 @@ def _app_payload(row: Application) -> dict[str, Any]:
         "apply_url": row.apply_url,
         "cover_letter": row.cover_letter,
         "created_at": row.created_at.isoformat() if row.created_at else None,
+        "pipeline_stage": row.pipeline_stage or "applied",
+        "user_notes": row.user_notes or "",
+        "follow_up_date": row.follow_up_date or "",
     }
