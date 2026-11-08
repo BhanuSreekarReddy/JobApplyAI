@@ -18,6 +18,7 @@ from .agent.companies import ResolveError, add_company, payload as company_paylo
 from .agent.formfill import fill_application, shutdown_browser
 from .agent.materials import cover_letter
 from .agent.runner import execute_run, primary_location, _app_payload, _job_payload, _public_profile
+from .agent.seen import record_seen
 from .config import UPLOAD_DIR
 from .db import Base, SessionLocal, engine, upgrade_schema
 from . import events
@@ -271,6 +272,25 @@ def list_applications():
         db.close()
 
 
+def _record_application_seen(db, application, job_row, status: str) -> None:
+    """Record an application that was actually sent, prepared, or filled as
+    seen, so future runs skip the job. Called only once an application's
+    outcome is known; skipped and failed applications record nothing."""
+    if status not in {"applied", "prepared", "filled"}:
+        return
+    record_seen(
+        db,
+        application.run_id,
+        {
+            "external_id": job_row.external_id if job_row else "",
+            "title": application.title,
+            "company": application.company,
+            "url": job_row.url if job_row else application.apply_url,
+        },
+        status,
+    )
+
+
 @app.post("/api/applications/{app_id}/fill")
 async def fill_application_form(app_id: int):
     db = SessionLocal()
@@ -306,6 +326,7 @@ async def fill_application_form(app_id: int):
         row.notes = result["notes"]
         db.commit()
         db.refresh(row)
+        _record_application_seen(db, row, job, result["status"])
         return _app_payload(row)
     finally:
         db.close()
@@ -409,6 +430,7 @@ async def approve_application(app_id: int):
         app.notes = result["notes"]
         db.commit()
         db.refresh(app)
+        _record_application_seen(db, app, job_row, result["status"])
         return _app_payload(app)
     finally:
         db.close()
