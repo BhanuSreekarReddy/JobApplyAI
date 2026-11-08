@@ -185,6 +185,7 @@ async def _remotive(client: httpx.AsyncClient, query: str) -> list[dict[str, Any
                 url=item.get("url") or "",
                 description=item.get("description") or "",
                 remote=True,
+                posted=item.get("publication_date") or "",
             )
         )
     return out
@@ -355,6 +356,7 @@ async def _adzuna(client: httpx.AsyncClient, query: str, place: AdzunaQuery) -> 
                 description=desc,
                 apply_email=email,
                 remote=remote,
+                posted=item.get("created") or "",
             )
         )
     return out

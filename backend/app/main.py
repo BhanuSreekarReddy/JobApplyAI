@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -54,6 +55,10 @@ def _migrate_application_tracker_columns() -> None:
 
 
 _migrate_application_tracker_columns()
+
+
+def _match_key(title: str, company: str) -> str:
+    return re.sub(r"\W+", "", f"{title or ''}{company or ''}".lower())
 
 app.add_middleware(
     CORSMiddleware,
@@ -138,6 +143,25 @@ def get_run(run_id: str):
             profile = json.loads(run.profile_json or "{}")
         except json.JSONDecodeError:
             profile = {}
+        # A match is new when no earlier run surfaced the same normalized
+        # title + company. Comparison uses existing tables only, and only
+        # runs created before this one count as earlier.
+        prior_keys: set[str] = set()
+        if run.created_at is not None:
+            earlier_ids = [
+                r.id
+                for r in db.query(Run).filter(Run.created_at < run.created_at).all()
+            ]
+            if earlier_ids:
+                prior_keys = {
+                    _match_key(r.title, r.company)
+                    for r in db.query(JobMatch).filter(JobMatch.run_id.in_(earlier_ids)).all()
+                }
+        job_payloads = []
+        for j in jobs:
+            payload = _job_payload(j)
+            payload["is_new"] = _match_key(j.title, j.company) not in prior_keys
+            job_payloads.append(payload)
         return {
             "id": run.id,
             "status": run.status,
@@ -149,11 +173,66 @@ def get_run(run_id: str):
             "summary": run.summary,
             "error": run.error,
             "profile": _public_profile(profile) if profile else {},
-            "jobs": [_job_payload(j) for j in jobs],
+            "jobs": job_payloads,
             "applications": [_app_payload(a) for a in apps],
         }
     finally:
         db.close()
+
+
+@app.get("/api/runs")
+def list_runs():
+    db = SessionLocal()
+    try:
+        rows = db.query(Run).order_by(Run.created_at.desc()).limit(50).all()
+        return [
+            {
+                "id": r.id,
+                "status": r.status,
+                "locations": r.locations,
+                "summary": r.summary,
+                "error": r.error,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
+    finally:
+        db.close()
+
+
+@app.post("/api/runs/{run_id}/rerun")
+def rerun_run(run_id: str, background: BackgroundTasks):
+    """Re-run with the original run's settings and resume. Scheduling is left
+    to the caller (for example a cron job hitting this endpoint daily)."""
+    db = SessionLocal()
+    try:
+        original = db.get(Run, run_id)
+        if not original:
+            raise HTTPException(404, "Run not found")
+        seeded_email = ""
+        try:
+            seeded_email = (json.loads(original.profile_json or "{}") or {}).get("email") or ""
+        except json.JSONDecodeError:
+            seeded_email = ""
+        new_id = uuid.uuid4().hex[:12]
+        run = Run(
+            id=new_id,
+            status="queued",
+            locations=original.locations,
+            auto_apply=original.auto_apply,
+            browser_fill=original.browser_fill,
+            min_score=original.min_score,
+            max_applications=original.max_applications,
+            resume_path=original.resume_path,
+            profile_json=json.dumps({"email": seeded_email} if seeded_email else {}),
+        )
+        db.add(run)
+        db.commit()
+    finally:
+        db.close()
+
+    background.add_task(_run_in_background, new_id)
+    return {"id": new_id, "status": "queued"}
 
 
 @app.get("/api/runs/{run_id}/events")
