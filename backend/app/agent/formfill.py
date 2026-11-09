@@ -435,7 +435,17 @@ async def _fill(url: str, values: dict[str, Any]) -> dict[str, str]:
     page = blank[0] if blank else await ctx.new_page()
     await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
     await _settle(page)
+    result = await _fill_open_page(page, values)
+    result.pop("_page", None)
+    return result
 
+
+async def _fill_open_page(page: Any, values: dict[str, Any]) -> dict[str, Any]:
+    """Fill the application form on an already-open page. Shared by the local
+    browser flow and by streamed pre-fill sessions, which supply their own
+    page in an ephemeral context. Returns the usual status/channel/notes
+    plus `filled` and `needs_attention` field labels and the active `_page`
+    (clicking through an Apply link can move to a different page)."""
     fields = await _scan(page)
     tried: set[str] = set()
     for _ in range(4):
@@ -457,7 +467,7 @@ async def _fill(url: str, values: dict[str, Any]) -> dict[str, str]:
             note += f" with the subject “{subject}”." if subject else "."
             await _banner(page, f"JobApply Agent: {note}")
             await page.bring_to_front()
-            return {"status": "prepared", "channel": "mailto", "notes": note, "apply_email": address, "email_subject": subject}
+            return {"status": "prepared", "channel": "mailto", "notes": note, "apply_email": address, "email_subject": subject, "filled": [], "needs_attention": [], "_page": page}
         note = "Couldn't find an application form at the apply URL."
         if needs_login:
             note = (
@@ -466,7 +476,7 @@ async def _fill(url: str, values: dict[str, Any]) -> dict[str, str]:
             )
         await _banner(page, f"JobApply Agent: {note}")
         await page.bring_to_front()
-        return {"status": "prepared", "channel": "ats_link", "notes": note + " Packet is ready."}
+        return {"status": "prepared", "channel": "ats_link", "notes": note + " Packet is ready.", "filled": [], "needs_attention": [], "_page": page}
 
     done: list[dict[str, Any]] = []
     todo: list[dict[str, Any]] = []
@@ -514,6 +524,9 @@ async def _fill(url: str, values: dict[str, Any]) -> dict[str, str]:
         "status": "filled" if done else "prepared",
         "channel": "browser",
         "notes": " · ".join(lines),
+        "filled": list(dict.fromkeys(_display(f) for f in done)),
+        "needs_attention": list(dict.fromkeys(_display(f) for f in todo)),
+        "_page": page,
     }
 
 
@@ -863,7 +876,7 @@ def _packet_files(profile: dict[str, Any], cover: str, resume_path: str, packet_
     out.mkdir(parents=True, exist_ok=True)
     files: dict[str, Path] = {}
     src = Path(resume_path)
-    if src.exists():
+    if src.is_file():
         dest = out / f"{stem}_Resume{src.suffix.lower()}"
         dest.write_bytes(src.read_bytes())
         files["resume"] = dest
