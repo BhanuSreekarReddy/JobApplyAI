@@ -132,6 +132,17 @@ def test_standalone_fill_records_seen(client, seeded, monkeypatch):
     assert rows[0].status == "filled"
 
 
+def test_skip_records(client, seeded):
+    app = seeded("seen-skip-run", browser_fill=0)
+    res = client.post(f"/api/applications/{app.id}/skip")
+    assert res.status_code == 200
+    assert res.json()["status"] == "skipped"
+
+    rows = _seen_rows("seen-skip-run")
+    assert len(rows) == 1
+    assert rows[0].status == "skipped"
+
+
 def test_failed_approval_records_nothing(client, seeded, monkeypatch):
     def fake_apply(**kwargs):
         return {"status": "failed", "channel": "email", "notes": "SMTP unavailable."}
