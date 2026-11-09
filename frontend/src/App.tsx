@@ -1,6 +1,20 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import Companies from "./Companies";
 import JobLink from "./JobLink";
+import PrefillView from "./Prefill";
+import {
+  AdminPage,
+  AuthPage,
+  AuthUser,
+  ForgotPage,
+  Landing,
+  LoginPage,
+  ProfilePage,
+  PublicSummary,
+  RegisterPage,
+  ResetPage,
+  VerifyPage,
+} from "./auth";
 
 type Profile = {
   name?: string;
@@ -85,8 +99,19 @@ type RunSummary = {
   created_at: string | null;
 };
 
-export default function App() {
-  const [tab, setTab] = useState<"run" | "tracker" | "companies" | "review" | "history">("run");
+function Workspace({
+  user,
+  hosted,
+  onLogout,
+}: {
+  user: AuthUser;
+  hosted: boolean;
+  onLogout: () => void;
+}) {
+  const [tab, setTab] = useState<
+    "run" | "tracker" | "companies" | "review" | "history" | "profile" | "admin"
+  >("run");
+  const [prefillSession, setPrefillSession] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [locations, setLocations] = useState("San Francisco, CA, Remote");
   const [email, setEmail] = useState("");
@@ -141,6 +166,26 @@ export default function App() {
     }
   }
 
+  async function startPrefill(app: Application) {
+    // Hosted mode: pre-fill runs as a streamed session in an ephemeral
+    // server-side browser instead of a local browser window.
+    setWorking(app.id);
+    try {
+      const res = await fetch("/api/prefill-sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ application_id: app.id }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const session = (await res.json()) as { id: string };
+      setPrefillSession(session.id);
+    } catch (err) {
+      replaceApp({ ...app, notes: err instanceof Error ? err.message : "Request failed" });
+    } finally {
+      setWorking(null);
+    }
+  }
+
   function appButtons(app: Application) {
     if (app.status === "applied") return null;
     if (app.status === "pending_review")
@@ -153,8 +198,18 @@ export default function App() {
     return (
       <>
         {app.apply_url ? (
-          <button className="ghost" disabled={working !== null} onClick={() => void appAction(app, "fill")}>
-            {pending ? "Filling…" : app.status === "filled" ? "Fill again" : "Fill form in browser"}
+          <button
+            className="ghost"
+            disabled={working !== null}
+            onClick={() => void (hosted ? startPrefill(app) : appAction(app, "fill"))}
+          >
+            {pending
+              ? hosted
+                ? "Opening…"
+                : "Filling…"
+              : app.status === "filled"
+                ? "Fill again"
+                : "Fill form in browser"}
           </button>
         ) : null}
         <button className="ghost" disabled={working !== null} onClick={() => void appAction(app, "submitted")}>
@@ -407,9 +462,33 @@ export default function App() {
           <button className={tab === "history" ? "active" : ""} onClick={() => void loadRunHistory()}>
             Past runs
           </button>
+          <button className={tab === "profile" ? "active" : ""} onClick={() => setTab("profile")}>
+            Profile
+          </button>
+          {user.role === "admin" ? (
+            <button className={tab === "admin" ? "active" : ""} onClick={() => setTab("admin")}>
+              Admin
+            </button>
+          ) : null}
+          <span className="meta" style={{ alignSelf: "center" }}>
+            {user.email}
+            {user.email_verified ? "" : " (unverified)"}
+          </span>
+          <button onClick={onLogout}>Sign out</button>
         </div>
       </header>
 
+      {!user.email_verified ? (
+        <p className="notice error">
+          Your email is not verified yet — check your inbox for the verification link. You can
+          look around, but runs cannot start until the address is verified.
+        </p>
+      ) : null}
+      {prefillSession ? (
+        <PrefillView sessionId={prefillSession} onClose={() => setPrefillSession(null)} />
+      ) : null}
+      {tab === "profile" ? <ProfilePage /> : null}
+      {tab === "admin" && user.role === "admin" ? <AdminPage /> : null}
       {tab === "companies" ? <Companies /> : null}
       {tab === "run" ? (
         <div className="grid">
@@ -739,4 +818,73 @@ export default function App() {
       ) : null}
     </div>
   );
+}
+
+export default function Root() {
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [hosted, setHosted] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [summary, setSummary] = useState<PublicSummary | null>(null);
+  const [page, setPage] = useState<AuthPage>(() =>
+    window.location.pathname === "/verify-email"
+      ? "verify"
+      : window.location.pathname === "/reset-password"
+        ? "reset"
+        : "landing",
+  );
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const cfg = await fetch("/api/config").then((r) => r.json());
+        setHosted(Boolean(cfg?.hosted));
+      } catch {
+        /* config is best-effort */
+      }
+      try {
+        const res = await fetch("/api/auth/me");
+        if (res.ok) setUser((await res.json()) as AuthUser);
+      } catch {
+        /* signed out */
+      }
+      try {
+        const res = await fetch("/api/public/summary");
+        if (res.ok) setSummary((await res.json()) as PublicSummary);
+      } catch {
+        /* landing works without stats */
+      }
+      setLoading(false);
+    })();
+  }, []);
+
+  async function logout() {
+    await fetch("/api/auth/logout", { method: "POST" }).catch(() => null);
+    setUser(null);
+    setPage("landing");
+  }
+
+  if (loading) {
+    return (
+      <div className="app">
+        <p className="lede">Loading…</p>
+      </div>
+    );
+  }
+  if (user) {
+    return <Workspace user={user} hosted={hosted} onLogout={() => void logout()} />;
+  }
+  switch (page) {
+    case "login":
+      return <LoginPage go={setPage} onSignedIn={setUser} />;
+    case "register":
+      return <RegisterPage go={setPage} onSignedIn={setUser} />;
+    case "verify":
+      return <VerifyPage go={setPage} />;
+    case "forgot":
+      return <ForgotPage go={setPage} />;
+    case "reset":
+      return <ResetPage go={setPage} />;
+    default:
+      return <Landing summary={summary} go={setPage} />;
+  }
 }
