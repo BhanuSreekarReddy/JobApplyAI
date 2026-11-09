@@ -161,8 +161,12 @@ def test_email_verification_flow_and_run_gate(monkeypatch):
     token = _outbox_token(email, "verify")
     r = client.post("/api/auth/verify-email", json={"token": token})
     assert r.status_code == 200
-    # The same token cannot be used twice.
-    assert client.post("/api/auth/verify-email", json={"token": token}).status_code == 400
+    # Re-submitting the same link is idempotent once verified (mail
+    # scanners pre-fetch links; pages double-submit), but a bogus token
+    # is still rejected.
+    r = client.post("/api/auth/verify-email", json={"token": token})
+    assert r.status_code == 200 and r.json()["already_verified"] is True
+    assert client.post("/api/auth/verify-email", json={"token": "nope"}).status_code == 400
 
     # Verified now: run creation is accepted (background execution stubbed).
     monkeypatch.setattr(main, "_run_in_background", lambda run_id: None)

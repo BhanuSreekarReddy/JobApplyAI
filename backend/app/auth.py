@@ -219,6 +219,19 @@ def consume_action_token(db: Session, raw: str, purpose: str) -> User | None:
     return db.get(User, row.user_id)
 
 
+def user_for_action_token(db: Session, raw: str, purpose: str) -> User | None:
+    """The user a token was issued to, whether or not it has been consumed.
+    Lets the verify-email endpoint answer idempotently: email links get
+    double-clicked, pre-fetched by mail scanners, and re-submitted by the
+    page itself, and an already-verified account should just be told so."""
+    row = (
+        db.query(AuthToken)
+        .filter(AuthToken.token_hash == _token_hash(raw), AuthToken.purpose == purpose)
+        .first()
+    )
+    return db.get(User, row.user_id) if row is not None else None
+
+
 def send_email(db: Session, to_email: str, subject: str, body: str, kind: str) -> EmailOutbox:
     """Record the message in the outbox (always) and send it via SMTP when
     configured. The outbox is what lets verification/reset flows complete in

@@ -267,6 +267,11 @@ def verify_email(body: TokenBody):
     try:
         user = auth.consume_action_token(db, body.token, "verify")
         if user is None:
+            # Idempotent for an already-verified account: the link may have
+            # been clicked (or submitted by the page) more than once.
+            already = auth.user_for_action_token(db, body.token, "verify")
+            if already is not None and already.email_verified:
+                return {"ok": True, "email": already.email, "already_verified": True}
             raise HTTPException(400, "That verification link is invalid or has expired.")
         user.email_verified = 1
         db.commit()

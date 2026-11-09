@@ -59,6 +59,7 @@ class _Live:
         self.frames: queue.Queue[str] = queue.Queue(maxsize=30)
         self.last_activity = datetime.utcnow()
         self.ws_active = False
+        self.stream_gen = 0
         self.closed = False
 
 
@@ -365,10 +366,23 @@ async def stream_prefill_session(websocket: WebSocket, session_id: str):
         await websocket.close(code=4404)
         return
     if live.ws_active:
+        # A previous stream may still be tearing down (the web client can
+        # reconnect immediately, e.g. React StrictMode's double effect in
+        # dev). Give it a moment to release before refusing the new one.
+        for _ in range(20):
+            if not live.ws_active or live.closed:
+                break
+            await asyncio.sleep(0.1)
+    if live.closed:
+        await websocket.close(code=4404)
+        return
+    if live.ws_active:
         await websocket.close(code=4409)
         return
     await websocket.accept()
     live.ws_active = True
+    live.stream_gen += 1
+    stream_gen = live.stream_gen
     live.last_activity = datetime.utcnow()
 
     async def on_frame(event: dict[str, Any]) -> None:
@@ -419,12 +433,14 @@ async def stream_prefill_session(websocket: WebSocket, session_id: str):
             pump_task.cancel()
     finally:
         live.ws_active = False
-        # A dropped stream ends the session: the ephemeral profile is wiped
-        # rather than left sitting on the server. The close runs in its own
-        # task, shielded — a hard client disconnect can cancel this handler
-        # task, and the wipe must still complete.
-        closing = asyncio.ensure_future(_close_live(live, "stream disconnected"))
-        try:
-            await asyncio.shield(closing)
-        except asyncio.CancelledError:
-            pass
+        # A dropped stream ends the session — after a short grace period.
+        # The web client can reconnect instantly (React StrictMode remounts
+        # in dev; browsers retry after a blip), and a reconnect with the
+        # same owner reattaches to the still-open form instead of losing
+        # it. If nobody comes back, the ephemeral profile is wiped.
+        async def _close_after_grace(gen: int = stream_gen) -> None:
+            await asyncio.sleep(3)
+            if live.stream_gen == gen and not live.ws_active and not live.closed:
+                await _close_live(live, "stream disconnected")
+
+        asyncio.ensure_future(_close_after_grace())
