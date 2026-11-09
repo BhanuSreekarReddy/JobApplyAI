@@ -25,6 +25,15 @@ class Settings(BaseSettings):
     usajobs_api_key: str = ""
     usajobs_user_agent: str = "JobApply/1.0"
     formfill_headless: bool = False
+    # Accounts / hosted mode. ADMIN_EMAILS is a comma-separated list; anyone
+    # who registers with one of those addresses becomes an admin.
+    admin_emails: str = ""
+    # Optional one-time invite code created at startup so the very first
+    # (admin) account can register while registration is invite-only.
+    jobapply_bootstrap_invite: str = ""
+    jobapply_hosted: bool = False
+    max_runs_per_day: int = 20
+    session_cookie_secure: bool = False
 
 
 settings = Settings()
