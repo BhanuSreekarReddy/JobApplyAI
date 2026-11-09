@@ -21,7 +21,7 @@ Marketing/explainer only: what it does, how it works, live counts it can honestl
 Account required to start a run (resume upload / search) and for everything downstream (review queue, tracker, seen, apply). Logged-out visitors get the home page and the demo only. This matches "profile required to use the application" and keeps every run attributable to an owner, which the data model needs anyway.
 
 ### 3. Signup & login (v1)
-- Email + password. **Email verification required before the first run** (unverified accounts can log in and complete their profile, nothing more).
+- Email + password. **Registration is invite-only at launch**: signup requires a valid admin-issued invite (link or code), checked when the account is created. **Email verification required before the first run** (unverified accounts can log in and complete their profile, nothing more).
 - Password reset via emailed link (single-use, expiring token).
 - Google OAuth is a phase-2 fast follow, not v1 — email/password is also what makes admin seeding by email work cleanly.
 - Passwords hashed with argon2id (bcrypt acceptable). Auth via secure, HttpOnly, SameSite=Lax session cookies; login endpoint rate-limited.
@@ -62,6 +62,6 @@ HTTPS only; session cookies Secure/HttpOnly/SameSite=Lax; CSRF protection on sta
 - **Phase 1 (v1)**: public home page + demo; signup/login/verify/reset; persistent profile; `user_id` isolation + migration script; Postgres; seeded-email admins with user list/deactivate/delete + audit log; global-starter/per-user companies; service keys + per-user quotas; hosted browser pre-fill via streamed ephemeral sessions (decision 8; local mode keeps on-machine prefill).
 - **Phase 2**: Google OAuth; multiple profiles/resumes; admin company-management UI and promote-to-global; optional local helper/extension for pre-fill; per-user API keys if demand appears.
 
-## Open items to decide
-- Hosting target and budget (drives the OpenAI quota numbers).
-- Whether registration is open to anyone at launch or invite-only (the admin "open/close registration" toggle covers either; default recommendation: invite-only until quotas are proven).
+## Settled / open items
+- **Registration at launch: invite-only** (decided). Signup requires an invite issued by an admin; the admin "open/close registration" toggle (decision 5) can open it later once quotas are proven.
+- Still open: hosting target and budget (drives the OpenAI quota numbers).
