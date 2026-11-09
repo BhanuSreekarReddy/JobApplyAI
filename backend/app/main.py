@@ -273,10 +273,10 @@ def list_applications():
 
 
 def _record_application_seen(db, application, job_row, status: str) -> None:
-    """Record an application that was actually sent, prepared, or filled as
+    """Record an application that was actually sent, prepared, filled, or skipped as
     seen, so future runs skip the job. Called only once an application's
-    outcome is known; skipped and failed applications record nothing."""
-    if status not in {"applied", "prepared", "filled"}:
+    outcome is known; failed applications record nothing."""
+    if status not in {"applied", "prepared", "filled", "skipped"}:
         return
     record_seen(
         db,
@@ -445,10 +445,12 @@ def skip_application(app_id: int):
             raise HTTPException(404, "Application not found")
         if app.status != "pending_review":
             raise HTTPException(400, "Only applications waiting for review can be skipped")
+        job_row = db.get(JobMatch, app.job_id) if app.job_id else None
         app.status = "skipped"
         app.notes = "Skipped during review."
         db.commit()
         db.refresh(app)
+        _record_application_seen(db, app, job_row, "skipped")
         return _app_payload(app)
     finally:
         db.close()
