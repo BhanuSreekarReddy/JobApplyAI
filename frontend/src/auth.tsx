@@ -12,7 +12,7 @@ export type AuthUser = {
 export type PublicSummary = {
   app_name: string;
   tagline: string;
-  companies_enabled: number;
+  companies: number;
   open_jobs: number;
 };
 
@@ -91,8 +91,7 @@ export function Landing({
         </p>
         {summary ? (
           <p className="lede">
-            Tracking {summary.companies_enabled} companies and {summary.open_jobs} open roles
-            right now.
+            Tracking {summary.companies} companies and {summary.open_jobs} open roles right now.
           </p>
         ) : null}
         <p className="meta">

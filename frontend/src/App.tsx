@@ -870,6 +870,10 @@ export default function Root() {
       </div>
     );
   }
+  // Email-link flows render even when a session exists: a signed-in user
+  // clicking the verification link still has to complete verification.
+  if (page === "verify") return <VerifyPage go={setPage} />;
+  if (page === "reset") return <ResetPage go={setPage} />;
   if (user) {
     return <Workspace user={user} hosted={hosted} onLogout={() => void logout()} />;
   }
@@ -878,12 +882,8 @@ export default function Root() {
       return <LoginPage go={setPage} onSignedIn={setUser} />;
     case "register":
       return <RegisterPage go={setPage} onSignedIn={setUser} />;
-    case "verify":
-      return <VerifyPage go={setPage} />;
     case "forgot":
       return <ForgotPage go={setPage} />;
-    case "reset":
-      return <ResetPage go={setPage} />;
     default:
       return <Landing summary={summary} go={setPage} />;
   }
