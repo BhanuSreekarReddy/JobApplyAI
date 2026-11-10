@@ -1,6 +1,6 @@
 # JobApplyAI — Hosted service, accounts & admin: design proposal
 
-Status: PROPOSAL for review — nothing implemented yet.
+Status: PROPOSAL for review — **implemented in PR #8**; this document was updated after the build to match the implementation as built (see decisions 3, 5 and 7 for the as-built details).
 Settled up front: (1) the app becomes a **hosted service**; (2) **admins are users seeded by email**.
 Everything below answers the remaining product questions for that direction, grounded in the current codebase (`backend/app/models.py`, `agent/profile.py`, README).
 
@@ -22,7 +22,7 @@ Account required to start a run (resume upload / search) and for everything down
 
 ### 3. Signup & login (v1)
 - Email + password. **Registration is invite-only at launch**: signup requires a valid admin-issued invite (link or code), checked when the account is created. **Email verification required before the first run** (unverified accounts can log in and complete their profile, nothing more).
-- Password reset via emailed link (single-use, expiring token).
+- Password reset via emailed link (single-use, expiring token). As implemented in PR #8: verification and reset tokens are random, stored only as SHA-256 hashes, and single-use — verification links expire in 24 hours, reset links in 2 hours. Both emails are sent by the account-email setup in decision 7.
 - Google OAuth is a phase-2 fast follow, not v1 — email/password is also what makes admin seeding by email work cleanly.
 - Passwords hashed with argon2id (bcrypt acceptable). Auth via secure, HttpOnly, SameSite=Lax session cookies; login endpoint rate-limited.
 
@@ -33,6 +33,7 @@ Account required to start a run (resume upload / search) and for everything down
 
 ### 5. Admin (seeded by email) — concrete powers for v1
 - Seed list in server config: `ADMIN_EMAILS` (comma-separated). On signup, an account whose email matches gets role `admin`. Seeded admins cannot be demoted or deleted through the UI.
+- First-admin bootstrap, as implemented: an optional one-time `JOBAPPLY_BOOTSTRAP_INVITE` code can be set in server config so the very first (admin) account can register while registration is invite-only; admins issue further invites from the admin UI.
 - Admins can: list/search users; see account metadata and usage counts (runs, applications — **not** resume contents or cover letters; that line is deliberate); deactivate/reactivate a user (blocks login, keeps data); delete a user and all their data; open/close registration; manage the global company list.
 - An admin can promote another user to admin (audited); the seed list remains the bootstrap of trust.
 - Every admin action writes an **audit log** entry (who, what, target user, when).
@@ -45,8 +46,9 @@ Account required to start a run (resume upload / search) and for everything down
 
 ### 7. Keys, costs, quotas
 - All keys become **service-owned** (server env only): OpenAI, Adzuna, USAJobs, SMTP. Per-user keys are out of scope for v1.
-- Because the service now pays for OpenAI calls, add per-user quotas: runs per day and the existing per-run `max_applications` cap (default 8) become the cost controls; admins can raise a user's quota.
+- Because the service now pays for OpenAI calls, add per-user quotas: runs per day (implemented as `MAX_RUNS_PER_DAY`, default 20) and the existing per-run `max_applications` cap (default 8) become the cost controls; admins can raise a user's quota.
 - Application emails send from the service SMTP with **Reply-To set to the user's email**, so employer replies reach the applicant, not the service inbox.
+- **Account email (verification & password reset) — settled during implementation:** account emails go out through the same `SMTP_*` settings. A dedicated Gmail account was created for the project — **jobapplyai.app@gmail.com** — and the app sends through Gmail's SMTP server (`smtp.gmail.com:587`, STARTTLS) using an **App Password** as `SMTP_PASSWORD` (the account has 2-Step Verification on; its normal password does not work for SMTP). Every outgoing email is first recorded in an **`email_outbox`** database table; it is sent via SMTP only when `SMTP_HOST` is configured — with SMTP unset, mail is outbox-only, which is how the flows are tested locally. Gmail's free limit (~500 recipients/day) is ample for invite-only verification and reset mail at launch, and the provider can later be swapped (e.g. Resend, Amazon SES) through the same `SMTP_*` variables with no code change. All mail secrets live only in the host's environment settings, never in the repo. Setup steps for a fresh deployment are documented in the README (PR #8).
 
 ### 8. Browser pre-fill in hosted mode — streamed, ephemeral sessions (revised after review discussion)
 Pre-fill does NOT need the user's own machine — Playwright runs wherever Chromium runs. The hosted design is a **streamed browser session**: the form is filled in a server-side Chromium and streamed into the user's browser tab; the user watches it fill, takes control to answer the highlighted questions (EEO, work authorization, CAPTCHA) and clicks Submit themselves. The **never-submit rule is unchanged** — the agent never submits.
@@ -64,4 +66,5 @@ HTTPS only; session cookies Secure/HttpOnly/SameSite=Lax; CSRF protection on sta
 
 ## Settled / open items
 - **Registration at launch: invite-only** (decided). Signup requires an invite issued by an admin; the admin "open/close registration" toggle (decision 5) can open it later once quotas are proven.
-- Still open: hosting target and budget (drives the OpenAI quota numbers).
+- **Account email provider: dedicated Gmail account over SMTP** (decided during implementation, decision 7) — jobapplyai.app@gmail.com with an App Password; no separate mail-service account or cost at launch.
+- Still open: hosting target and budget (drives the OpenAI quota numbers). The mail-sending setup is no longer part of this open item — it is settled above; at deploy time the same `SMTP_*` values are entered as secret environment variables on the chosen host.
