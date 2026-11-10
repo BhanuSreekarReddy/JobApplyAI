@@ -159,6 +159,7 @@ label {
 
 input[type="text"],
 input[type="email"],
+input[type="password"],
 input[type="number"],
 input[type="url"],
 input[type="search"],
@@ -175,6 +176,25 @@ input[type="file"] {
   font-size: 12px;
   margin: 6px 0 0;
   line-height: 1.45;
+}
+
+.steps {
+  margin: 0 0 18px;
+  padding-left: 20px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+.steps li {
+  margin: 6px 0;
+}
+
+.auth-links {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 18px;
 }
 
 .stack {

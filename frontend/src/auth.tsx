@@ -83,15 +83,20 @@ export function Landing({
           submitted without your review.
         </p>
         <h3>How it works</h3>
-        <p className="meta">
-          1. Brief the agent with your resume and target locations. 2. It searches, scores, and
-          prepares application packets. 3. You review each packet, approve it, and — for employer
-          forms — watch the form get filled in a live streamed browser session, answer anything
-          highlighted, and click Submit yourself.
-        </p>
+        <ol className="steps">
+          <li>Brief the agent with your resume and target locations.</li>
+          <li>It searches, scores, and prepares application packets.</li>
+          <li>
+            You review each packet, approve it, and — for employer forms — watch the form get
+            filled in a live streamed browser session, answer anything highlighted, and click
+            Submit yourself.
+          </li>
+        </ol>
         {summary ? (
           <p className="lede">
-            Tracking {summary.companies} companies and {summary.open_jobs} open roles right now.
+            {summary.open_jobs > 0
+              ? `Tracking ${summary.companies} companies and ${summary.open_jobs} open roles right now.`
+              : `Tracking ${summary.companies} companies right now.`}
           </p>
         ) : null}
         <p className="meta">
@@ -182,10 +187,10 @@ export function LoginPage({
           {busy ? "Signing in…" : "Sign in"}
         </button>
       </form>
-      <p className="meta">
+      <p className="meta auth-links">
         <button className="ghost" onClick={() => go("forgot")}>
           Forgot password
-        </button>{" "}
+        </button>
         <button className="ghost" onClick={() => go("register")}>
           Register with an invite
         </button>
@@ -249,8 +254,8 @@ export function RegisterPage({
           {busy ? "Creating account…" : "Create account"}
         </button>
       </form>
-      <p className="meta">
-        Already have an account?{" "}
+      <p className="meta auth-links">
+        Already have an account?
         <button className="ghost" onClick={() => go("login")}>
           Sign in
         </button>
