@@ -66,7 +66,7 @@ Copy `.env.example` to `.env`.
 | `JOBAPPLY_BOOTSTRAP_INVITE` | One-time invite code created at startup so the first admin can register |
 | `MAX_RUNS_PER_DAY` | Runs a non-admin user can start per day (default 20) |
 | `SESSION_COOKIE_SECURE` | `true` when served over HTTPS, so the session cookie only travels over secure connections |
-| `PUBLIC_BASE_URL` | Public origin (scheme + host) the app is opened at; verification and password-reset emails build their links from it (default `http://localhost:8000`; set it to the public address when hosted) |
+| `PUBLIC_BASE_URL` | Public origin (scheme + host) the app is opened at; verification and password-reset emails build their links from it (default `http://localhost:5173`; set it to the public address when hosted) |
 | `DATABASE_URL` | Any SQLAlchemy URL; hosted deployments should use Postgres instead of the local SQLite file |
 
 Without keys, the agent still searches every company board on the Companies tab plus the public remote job sites.

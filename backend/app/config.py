@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     # Public origin (scheme + host) the app is opened at. Account emails
     # build their verification and password-reset links from it, so hosted
     # deployments must set it to the public address.
-    public_base_url: str = "http://localhost:8000"
+    public_base_url: str = "http://localhost:5173"
 
 
 settings = Settings()

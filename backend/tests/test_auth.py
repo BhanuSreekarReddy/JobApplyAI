@@ -165,7 +165,7 @@ def test_email_verification_flow_and_run_gate(monkeypatch):
 
     token = _outbox_token(email, "verify")
     # The emailed link is absolute, built from the default public base URL.
-    assert "http://localhost:8000/verify-email?token=" in _outbox_body(email, "verify")
+    assert "http://localhost:5173/verify-email?token=" in _outbox_body(email, "verify")
     r = client.post("/api/auth/verify-email", json={"token": token})
     assert r.status_code == 200
     # Re-submitting the same link is idempotent once verified (mail
@@ -217,7 +217,7 @@ def test_password_reset_flow_uses_outbox():
 
     token = _outbox_token(email, "reset")
     # The emailed link is absolute, built from the default public base URL.
-    assert "http://localhost:8000/reset-password?token=" in _outbox_body(email, "reset")
+    assert "http://localhost:5173/reset-password?token=" in _outbox_body(email, "reset")
     r = client.post("/api/auth/reset-password", json={"token": token, "password": "NewPass456!"})
     assert r.status_code == 200
     # Single use.
