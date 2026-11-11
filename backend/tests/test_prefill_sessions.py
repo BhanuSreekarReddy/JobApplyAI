@@ -205,3 +205,58 @@ def test_real_session_fills_form_and_streams_frames(form_server):
         got = _wait_for_status(client, session["id"], "closed")
         assert got["status"] == "closed"
         assert not profile_dir.exists()
+
+
+TYPE_FORM_HTML = """<!doctype html>
+<html><body style="margin:0">
+<form>
+  <div><label>Nickname <input id="nick" type="text" name="nickname" autofocus style="width:600px;height:80px"></label></div>
+</form>
+</body></html>"""
+
+
+@pytest.fixture(scope="module")
+def type_form_server():
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = TYPE_FORM_HTML.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_address[1]}/apply"
+    server.shutdown()
+
+
+def test_typed_characters_appear_once(type_form_server):
+    """Regression: one keystroke in the streamed viewer must insert one
+    character. The keyboard fix sent keyDown (carrying text) followed by a
+    char event, and Chromium inserts the character for both."""
+    email = _unique_email("pftype")
+    user_id = _make_user(email)
+    app_id = _make_application(user_id, type_form_server)
+    with _logged_in(email) as client:
+        session = _create_session(client, app_id)
+        with client.websocket_connect(f"/api/prefill-sessions/{session['id']}/stream") as ws:
+            ws.receive_bytes()  # first frame: stream is live
+            ws.send_json({"type": "mouse", "action": "press", "x": 200, "y": 40, "button": "left"})
+            ws.send_json({"type": "mouse", "action": "release", "x": 200, "y": 40, "button": "left"})
+            for key, code, vk in (("a", "KeyA", 65), ("b", "KeyB", 66)):
+                ws.send_json({"type": "key", "action": "down", "key": key, "code": code, "text": key, "vk": vk})
+                ws.send_json({"type": "key", "action": "up", "key": key, "code": code, "vk": vk})
+            time.sleep(0.75)
+            r = client.post(f"/api/prefill-sessions/{session['id']}/answer-candidates")
+            assert r.status_code == 200, r.text
+            candidates = r.json()["candidates"]
+        assert client.post(f"/api/prefill-sessions/{session['id']}/close").status_code == 200
+    nick = [c for c in candidates if "Nickname" in c["question"]]
+    assert nick, f"no Nickname candidate in {candidates}"
+    assert nick[0]["answer"] == "ab", f"typed 'ab', field holds {nick[0]['answer']!r}"

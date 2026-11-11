@@ -416,13 +416,14 @@ async def _dispatch_input(live: _Live, message: dict[str, Any]) -> None:
                     down = dict(params)
                     if text:
                         down["text"] = text
-                    # A full keystroke: keyDown (carrying the text) followed
-                    # by char. Segmented one-time-code inputs run their
-                    # state machines on keydown, so a bare char event — what
-                    # the old client sent — left them unable to edit.
+                    # A full keystroke: keyDown carrying the text, then
+                    # keyUp. Segmented one-time-code inputs run their state
+                    # machines on keydown, so a bare char event — what the
+                    # old client sent — left them unable to edit. But do
+                    # NOT follow keyDown with a char event: Chromium
+                    # inserts the character for keyDown-with-text already,
+                    # so the extra char typed every character twice.
                     await cdp.send("Input.dispatchKeyEvent", {"type": "keyDown", **down})
-                    if text:
-                        await cdp.send("Input.dispatchKeyEvent", {"type": "char", "text": text})
                 else:
                     await cdp.send("Input.dispatchKeyEvent", {"type": "keyUp", **params})
         elif kind == "resize":

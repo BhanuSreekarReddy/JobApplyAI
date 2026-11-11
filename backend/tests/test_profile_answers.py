@@ -158,17 +158,19 @@ def _key_events(live) -> list[dict]:
     return [p for m, p in live.cdp.sent if m == "Input.dispatchKeyEvent"]
 
 
-def test_key_down_with_text_sends_keydown_then_char(tmp_path):
+def test_key_down_with_text_sends_keydown_only(tmp_path):
     live = _live_with_cdp(tmp_path)
     asyncio.run(prefill_sessions._dispatch_input(
         live, {"type": "key", "action": "down", "key": "5", "code": "Digit5", "text": "5", "vk": 53}
     ))
     events = _key_events(live)
-    assert [e["type"] for e in events] == ["keyDown", "char"]
+    # keyDown carries the text; a following char event would insert the
+    # character a second time in Chromium (see the streamed-session
+    # regression test test_typed_characters_appear_once).
+    assert [e["type"] for e in events] == ["keyDown"]
     assert events[0]["windowsVirtualKeyCode"] == 53
     assert events[0]["nativeVirtualKeyCode"] == 53
     assert events[0]["text"] == "5"
-    assert events[1]["text"] == "5"
 
     asyncio.run(prefill_sessions._dispatch_input(
         live, {"type": "key", "action": "up", "key": "5", "code": "Digit5", "vk": 53}
