@@ -61,7 +61,7 @@ def _logged_in(email: str, password: str = PASSWORD) -> TestClient:
     return client
 
 
-def _outbox_token(email: str, kind: str) -> str:
+def _outbox_body(email: str, kind: str) -> str:
     with SessionLocal() as db:
         row = (
             db.query(EmailOutbox)
@@ -70,9 +70,14 @@ def _outbox_token(email: str, kind: str) -> str:
             .first()
         )
         assert row is not None, f"no {kind} email in outbox for {email}"
-        match = re.search(r"token=([A-Za-z0-9_-]+)", row.body)
-        assert match, row.body
-        return match.group(1)
+        return row.body
+
+
+def _outbox_token(email: str, kind: str) -> str:
+    body = _outbox_body(email, kind)
+    match = re.search(r"token=([A-Za-z0-9_-]+)", body)
+    assert match, body
+    return match.group(1)
 
 
 def test_unauthenticated_requests_are_rejected():
@@ -159,6 +164,8 @@ def test_email_verification_flow_and_run_gate(monkeypatch):
     assert r.status_code == 403
 
     token = _outbox_token(email, "verify")
+    # The emailed link is absolute, built from the default public base URL.
+    assert "http://localhost:8000/verify-email?token=" in _outbox_body(email, "verify")
     r = client.post("/api/auth/verify-email", json={"token": token})
     assert r.status_code == 200
     # Re-submitting the same link is idempotent once verified (mail
@@ -184,6 +191,20 @@ def test_email_verification_flow_and_run_gate(monkeypatch):
     assert profile["contact_email"] == "priya.nair@example.com"
 
 
+def test_verification_email_uses_configured_public_base_url(monkeypatch):
+    # A trailing slash in the configured value must not produce "//".
+    monkeypatch.setattr(auth.settings, "public_base_url", "https://example.com/")
+    code = f"INV-{uuid.uuid4().hex[:10]}"
+    _add_invite(code)
+    email = _unique_email("baseurl")
+    client = _client()
+    r = client.post("/api/auth/register", json={"email": email, "password": PASSWORD, "invite_code": code})
+    assert r.status_code == 200, r.text
+    body = _outbox_body(email, "verify")
+    assert "https://example.com/verify-email?token=" in body
+    assert "example.com//verify-email" not in body
+
+
 def test_password_reset_flow_uses_outbox():
     email = _unique_email("reset")
     _make_user(email)
@@ -195,6 +216,8 @@ def test_password_reset_flow_uses_outbox():
     assert r.status_code == 200
 
     token = _outbox_token(email, "reset")
+    # The emailed link is absolute, built from the default public base URL.
+    assert "http://localhost:8000/reset-password?token=" in _outbox_body(email, "reset")
     r = client.post("/api/auth/reset-password", json={"token": token, "password": "NewPass456!"})
     assert r.status_code == 200
     # Single use.

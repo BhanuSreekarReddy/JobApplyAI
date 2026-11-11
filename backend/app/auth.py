@@ -266,7 +266,7 @@ def send_verification_email(db: Session, user: User) -> None:
         user.email,
         "Verify your JobApply Agent account",
         "Welcome to JobApply Agent.\n\n"
-        f"Verify your email address by opening this link:\n/verify-email?token={raw}\n\n"
+        f"Verify your email address by opening this link:\n{settings.public_base_url.rstrip('/')}/verify-email?token={raw}\n\n"
         "The link expires in 24 hours. If you did not create this account, ignore this email.",
         "verify",
     )
@@ -279,7 +279,7 @@ def send_password_reset_email(db: Session, user: User) -> None:
         user.email,
         "Reset your JobApply Agent password",
         "A password reset was requested for your JobApply Agent account.\n\n"
-        f"Open this link to choose a new password:\n/reset-password?token={raw}\n\n"
+        f"Open this link to choose a new password:\n{settings.public_base_url.rstrip('/')}/reset-password?token={raw}\n\n"
         "The link expires in 2 hours and can be used once. If you did not request "
         "this, ignore this email — your password is unchanged.",
         "reset",
