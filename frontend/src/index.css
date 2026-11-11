@@ -249,6 +249,31 @@ input[type="file"] {
   font-size: 13px;
 }
 
+.account {
+  position: relative;
+}
+
+.account-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 160px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 8px;
+  box-shadow: var(--shadow);
+  z-index: 10;
+}
+
+.account-menu button {
+  text-align: left;
+  white-space: nowrap;
+}
+
 .company-list {
   display: flex;
   flex-direction: column;

@@ -108,9 +108,9 @@ function Workspace({
   hosted: boolean;
   onLogout: () => void;
 }) {
-  const [tab, setTab] = useState<
-    "run" | "tracker" | "companies" | "review" | "history" | "profile" | "admin"
-  >("run");
+  const [tab, setTab] = useState<"run" | "tracker" | "companies" | "profile" | "admin">("run");
+  const [trackerFilter, setTrackerFilter] = useState<"all" | "needs_review" | "seen">("all");
+  const [menuOpen, setMenuOpen] = useState(false);
   const [prefillSession, setPrefillSession] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [locations, setLocations] = useState("San Francisco, CA, Remote");
@@ -132,9 +132,22 @@ function Workspace({
   >({});
   const [runHistory, setRunHistory] = useState<RunSummary[]>([]);
   const [newOnly, setNewOnly] = useState(false);
+  const [showAllMatches, setShowAllMatches] = useState(false);
   const [seen, setSeen] = useState<SeenJob[]>([]);
 
   const profile = run?.profile;
+  const matchedJobs = (run?.jobs || []).filter((job) => !newOnly || job.is_new);
+  // In My applications, packets still waiting for review come first.
+  const sortedHistory = [...history].sort(
+    (a, b) => (a.status === "pending_review" ? 0 : 1) - (b.status === "pending_review" ? 0 : 1),
+  );
+
+  // Load the review queue (for the tab badge) and the past runs (for the
+  // Recent runs list) up front, so both are current before they are viewed.
+  useEffect(() => {
+    void refreshReview();
+    void refreshRunHistory();
+  }, []);
 
   function replaceApp(updated: Application) {
     setRun((r) => (r ? { ...r, applications: r.applications.map((a) => (a.id === updated.id ? updated : a)) } : r));
@@ -190,7 +203,7 @@ function Workspace({
     if (app.status === "applied") return null;
     if (app.status === "pending_review")
       return (
-        <button className="ghost" onClick={() => void loadReview()}>
+        <button className="ghost" onClick={() => void goToReview()}>
           Review
         </button>
       );
@@ -235,6 +248,7 @@ function Workspace({
         source.close();
         void refresh(id);
         void refreshReview();
+        void refreshRunHistory();
       }
       if (event.type === "profile" || event.type === "job" || event.type === "application") {
         void refresh(id);
@@ -312,6 +326,7 @@ function Workspace({
     );
     const seenRows = await fetch("/api/seen").then((r) => r.json());
     setSeen(seenRows);
+    await refreshReview();
   }
 
   async function saveTracker(id: number) {
@@ -339,9 +354,10 @@ function Workspace({
     });
   }
 
-  async function loadReview() {
-    setTab("review");
-    await refreshReview();
+  async function goToReview() {
+    setTab("tracker");
+    setTrackerFilter("needs_review");
+    await loadTracker();
   }
 
   async function approveApp(id: number) {
@@ -412,8 +428,7 @@ function Workspace({
     );
   }
 
-  async function loadRunHistory() {
-    setTab("history");
+  async function refreshRunHistory() {
     const rows: RunSummary[] = await fetch("/api/runs").then((r) => r.json());
     setRunHistory(rows);
   }
@@ -448,33 +463,38 @@ function Workspace({
         </div>
         <div className="tabs">
           <button className={tab === "run" ? "active" : ""} onClick={() => setTab("run")}>
-            Agent
+            Find jobs
           </button>
           <button className={tab === "tracker" ? "active" : ""} onClick={() => void loadTracker()}>
-            Applications
-          </button>
-          <button className={tab === "review" ? "active" : ""} onClick={() => void loadReview()}>
-            Review
+            My applications{review.length > 0 ? ` (${review.length})` : ""}
           </button>
           <button className={tab === "companies" ? "active" : ""} onClick={() => setTab("companies")}>
             Companies
-          </button>
-          <button className={tab === "history" ? "active" : ""} onClick={() => void loadRunHistory()}>
-            Past runs
-          </button>
-          <button className={tab === "profile" ? "active" : ""} onClick={() => setTab("profile")}>
-            Profile
           </button>
           {user.role === "admin" ? (
             <button className={tab === "admin" ? "active" : ""} onClick={() => setTab("admin")}>
               Admin
             </button>
           ) : null}
-          <span className="meta" style={{ alignSelf: "center" }}>
-            {user.email}
-            {user.email_verified ? "" : " (unverified)"}
-          </span>
-          <button onClick={onLogout}>Sign out</button>
+          <div className="account">
+            <button className={tab === "profile" ? "active" : ""} onClick={() => setMenuOpen((o) => !o)}>
+              {user.email}
+              {user.email_verified ? "" : " (unverified)"} ▾
+            </button>
+            {menuOpen ? (
+              <div className="account-menu">
+                <button
+                  onClick={() => {
+                    setTab("profile");
+                    setMenuOpen(false);
+                  }}
+                >
+                  Profile
+                </button>
+                <button onClick={onLogout}>Sign out</button>
+              </div>
+            ) : null}
+          </div>
         </div>
       </header>
 
@@ -571,6 +591,37 @@ function Workspace({
             </button>
           </form>
           <JobLink<Application> runId={run?.id} onAdded={addApp} />
+          <section className="card">
+            <h2>Recent runs</h2>
+            <p className="lede">Reopen any past run, or re-run it with the same settings and resume.</p>
+            <div className="jobs">
+              {runHistory.length === 0 ? (
+                <p className="empty">No runs yet.</p>
+              ) : (
+                runHistory.map((r) => (
+                  <article className="job" key={r.id}>
+                    <header>
+                      <h3>Run {r.id}</h3>
+                      <span className={`status ${r.status}`}>{r.status}</span>
+                    </header>
+                    <p className="meta">
+                      {r.locations}
+                      {r.created_at ? ` · ${r.created_at.slice(0, 10)}` : ""}
+                    </p>
+                    <p className="meta">{r.summary || r.error}</p>
+                    <div className="row">
+                      <button className="ghost" onClick={() => void openHistoryRun(r.id)}>
+                        Open
+                      </button>
+                      <button className="ghost" onClick={() => void rerunRun(r.id)}>
+                        Re-run
+                      </button>
+                    </div>
+                  </article>
+                ))
+              )}
+            </div>
+          </section>
           </div>
 
           <section className="card">
@@ -596,38 +647,9 @@ function Workspace({
             <div className="log">
               {logs.length === 0 ? "Idle." : logs.map((line, i) => <div key={i}>› {line}</div>)}
             </div>
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={newOnly}
-                onChange={(e) => setNewOnly(e.target.checked)}
-              />
-              Only matches no earlier run has shown
-            </label>
-            <div className="jobs" style={{ marginTop: 16 }}>
-              {(run?.jobs || [])
-                .filter((job) => !newOnly || job.is_new)
-                .map((job) => (
-                  <article className="job" key={job.id}>
-                    <header>
-                      <h3>{job.title}</h3>
-                      <span className="score">{job.score.toFixed(0)}</span>
-                    </header>
-                    <p className="meta">
-                      {job.company} · {job.location || (job.remote ? "Remote" : "")} · {job.source}
-                      {job.posted_date ? ` · posted ${job.posted_date}` : ""}
-                    </p>
-                    {job.is_new ? <p className="meta">New since your last runs</p> : null}
-                    <p className="meta">{job.reasons}</p>
-                    <a href={job.apply_url || job.url} target="_blank" rel="noreferrer">
-                      Open posting
-                    </a>
-                  </article>
-                ))}
-            </div>
             {(run?.applications || []).length > 0 && (
               <div className="jobs" style={{ marginTop: 18 }}>
-                <h2>Packets</h2>
+                <h2>Applications prepared</h2>
                 {run!.applications.map((app) =>
                   app.status === "pending_review" ? (
                     reviewCard(app)
@@ -658,49 +680,117 @@ function Workspace({
                 ))}
               </div>
             )}
+            <div className="jobs" style={{ marginTop: 18 }}>
+              <h2>All matches</h2>
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={newOnly}
+                  onChange={(e) => setNewOnly(e.target.checked)}
+                />
+                Only matches no earlier run has shown
+              </label>
+              {matchedJobs
+                .slice(0, showAllMatches ? matchedJobs.length : 5)
+                .map((job) => (
+                  <article className="job" key={job.id}>
+                    <header>
+                      <h3>{job.title}</h3>
+                      <span className="score">{job.score.toFixed(0)}</span>
+                    </header>
+                    <p className="meta">
+                      {job.company} · {job.location || (job.remote ? "Remote" : "")} · {job.source}
+                      {job.posted_date ? ` · posted ${job.posted_date}` : ""}
+                    </p>
+                    {job.is_new ? <p className="meta">New since your last runs</p> : null}
+                    <p className="meta">{job.reasons}</p>
+                    <a href={job.apply_url || job.url} target="_blank" rel="noreferrer">
+                      Open posting
+                    </a>
+                  </article>
+                ))}
+              {matchedJobs.length > 5 ? (
+                <button className="ghost" onClick={() => setShowAllMatches((s) => !s)}>
+                  {showAllMatches ? "Show fewer" : `Show all ${matchedJobs.length} matches`}
+                </button>
+              ) : null}
+            </div>
           </section>
         </div>
-      ) : tab === "history" ? (
-        <section className="card">
-          <h2>Past runs</h2>
-          <p className="lede">Reopen any past run, or re-run it with the same settings and resume.</p>
-          <div className="jobs">
-            {runHistory.length === 0 ? (
-              <p className="empty">No runs yet.</p>
-            ) : (
-              runHistory.map((r) => (
-                <article className="job" key={r.id}>
-                  <header>
-                    <h3>Run {r.id}</h3>
-                    <span className={`status ${r.status}`}>{r.status}</span>
-                  </header>
-                  <p className="meta">
-                    {r.locations}
-                    {r.created_at ? ` · ${r.created_at.slice(0, 10)}` : ""}
-                  </p>
-                  <p className="meta">{r.summary || r.error}</p>
-                  <div className="row">
-                    <button className="ghost" onClick={() => void openHistoryRun(r.id)}>
-                      Open
-                    </button>
-                    <button className="ghost" onClick={() => void rerunRun(r.id)}>
-                      Re-run
-                    </button>
-                  </div>
-                </article>
-              ))
-            )}
-          </div>
-        </section>
       ) : tab === "tracker" ? (
         <section className="card">
-          <h2>Application tracker</h2>
+          <h2>My applications</h2>
           <p className="lede">Every packet the agent prepared or sent, newest first.</p>
+          <div className="tabs small" style={{ marginBottom: 16 }}>
+            <button
+              className={trackerFilter === "needs_review" ? "active" : ""}
+              onClick={() => setTrackerFilter("needs_review")}
+            >
+              Needs review ({review.length})
+            </button>
+            <button
+              className={trackerFilter === "all" ? "active" : ""}
+              onClick={() => setTrackerFilter("all")}
+            >
+              All
+            </button>
+            <button
+              className={trackerFilter === "seen" ? "active" : ""}
+              onClick={() => setTrackerFilter("seen")}
+            >
+              Previously applied
+            </button>
+          </div>
+          {trackerFilter === "needs_review" ? (
+            <>
+              <p className="lede">
+                Nothing here has been sent. Edit a letter, approve it to send, or skip it.
+              </p>
+              <div className="jobs">
+                {review.length === 0 ? (
+                  <p className="empty">No applications waiting for review.</p>
+                ) : (
+                  review.map((app) => reviewCard(app))
+                )}
+              </div>
+            </>
+          ) : trackerFilter === "seen" ? (
+            <>
+              <p className="lede">
+                Jobs already applied to or prepared in earlier runs. These are skipped automatically
+                by future runs.
+              </p>
+              <div className="jobs">
+                {seen.length === 0 ? (
+                  <p className="empty">Nothing applied to yet.</p>
+                ) : (
+                  seen.map((job) => (
+                    <article className="job" key={job.id}>
+                      <header>
+                        <h3>
+                          {job.title} · {job.company}
+                        </h3>
+                        <span className={`status ${job.status}`}>{job.status}</span>
+                      </header>
+                      <p className="meta">
+                        {job.created_at ? `First seen ${job.created_at.slice(0, 10)}` : ""}
+                      </p>
+                      {job.url ? (
+                        <a href={job.url} target="_blank" rel="noreferrer">
+                          Posting
+                        </a>
+                      ) : null}
+                    </article>
+                  ))
+                )}
+              </div>
+            </>
+          ) : (
           <div className="jobs">
-            {history.length === 0 ? (
+            {sortedHistory.length === 0 ? (
               <p className="empty">No applications yet.</p>
             ) : (
-              history.map((app) => {
+              sortedHistory.map((app) => {
                 const draft = trackerDrafts[app.id] ?? {
                   stage: app.pipeline_stage || "applied",
                   user_notes: app.user_notes || "",
@@ -770,50 +860,8 @@ function Workspace({
                 );
               })
             )}
-          </div>
-        </section>
-      ) : tab === "review" ? (
-        <section className="card">
-          <h2>Review queue</h2>
-          <p className="lede">
-            Nothing here has been sent. Edit a letter, approve it to send, or skip it.
-          </p>
-          <div className="jobs">
-            {review.length === 0 ? (
-              <p className="empty">No applications waiting for review.</p>
-            ) : (
-              review.map((app) => reviewCard(app))
-            )}
-          </div>
-          <h2 style={{ marginTop: 24 }}>Previously applied</h2>
-          <p className="lede">
-            Jobs already applied to or prepared in earlier runs. These are skipped automatically
-            by future runs.
-          </p>
-          <div className="jobs">
-            {seen.length === 0 ? (
-              <p className="empty">Nothing applied to yet.</p>
-            ) : (
-              seen.map((job) => (
-                <article className="job" key={job.id}>
-                  <header>
-                    <h3>
-                      {job.title} · {job.company}
-                    </h3>
-                    <span className={`status ${job.status}`}>{job.status}</span>
-                  </header>
-                  <p className="meta">
-                    {job.created_at ? `First seen ${job.created_at.slice(0, 10)}` : ""}
-                  </p>
-                  {job.url ? (
-                    <a href={job.url} target="_blank" rel="noreferrer">
-                      Posting
-                    </a>
-                  ) : null}
-                </article>
-              ))
-            )}
-          </div>
+            </div>
+          )}
         </section>
       ) : null}
     </div>
