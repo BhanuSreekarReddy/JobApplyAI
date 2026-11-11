@@ -29,6 +29,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
+from . import answers as profile_answers
 from . import auth
 from .agent import formfill
 from .agent.runner import primary_location
@@ -61,6 +62,10 @@ class _Live:
         self.ws_active = False
         self.stream_gen = 0
         self.closed = False
+        # Normalized label -> value for everything the agent filled at
+        # startup; the answer-capture diff compares the live form against
+        # this so only values the USER typed are offered for saving.
+        self.filled_values: dict[str, str] = {}
 
 
 _live: dict[str, _Live] = {}
@@ -174,6 +179,7 @@ async def create_prefill_session(body: CreateSession, request: Request):
         location = primary_location(run.locations)
         apply_url = application.apply_url
         job_description = job.description if job else ""
+        saved_answers = profile_answers.answers_map(db, user.id)
     finally:
         db.close()
 
@@ -213,9 +219,10 @@ async def create_prefill_session(body: CreateSession, request: Request):
         await page.goto(apply_url, wait_until="domcontentloaded", timeout=45_000)
         await formfill._settle(page)
         files = formfill._packet_files(profile, cover, resume_path, f"{run.id}-{application.job_id}")
-        values = formfill._values(profile, location, cover, files)
+        values = formfill._values(profile, location, cover, files, saved_answers)
         result = await formfill._fill_open_page(page, values)
         live.page = result.pop("_page", page)
+        live.filled_values = result.pop("filled_values", {}) or {}
     except Exception as exc:
         reason = str(exc).splitlines()[0][:200] if str(exc) else exc.__class__.__name__
         log.warning("prefill session %s failed to start: %s", session_id, reason)
@@ -293,6 +300,67 @@ async def close_prefill_session(session_id: str, request: Request):
     return {"closed": True}
 
 
+@router.post("/api/prefill-sessions/{session_id}/answer-candidates")
+async def answer_candidates(session_id: str, request: Request):
+    """Re-scan the live form and return the values the user typed themselves
+    (diffed against what the agent filled) as answer-bank candidates.
+    Nothing is saved by this endpoint — the client shows the candidates and
+    the user picks which ones to keep."""
+    user = auth.current_user(request)
+    db = SessionLocal()
+    try:
+        _owned_record(db, session_id, user.id)
+    finally:
+        db.close()
+    live = _live.get(session_id)
+    if live is None or live.closed or live.page is None:
+        raise HTTPException(409, "This pre-fill session is no longer live.")
+    scanned = await formfill._scan_form_values(live.page)
+    return {"candidates": formfill.answer_candidates(scanned, live.filled_values)}
+
+
+class SaveAnswers(BaseModel):
+    answers: list[dict[str, str]]
+
+
+@router.post("/api/prefill-sessions/{session_id}/save-answers")
+def save_session_answers(session_id: str, body: SaveAnswers, request: Request):
+    """Save the user-selected candidates into their profile answer bank."""
+    user = auth.current_user(request)
+    db = SessionLocal()
+    try:
+        _owned_record(db, session_id, user.id)
+        saved = profile_answers.upsert_answers(db, user.id, body.answers)
+        by_key = {a["key"]: a for a in saved}
+        return {"saved": [by_key[a["key"]] for a in body.answers if a.get("key") in by_key]}
+    finally:
+        db.close()
+
+
+# Fallback virtual key codes when the client did not send one (older client,
+# or a key whose keyCode the browser reports as 0). Chromium performs no
+# default editing for key events without a virtual key code, which is why
+# Backspace/Delete/arrows used to do nothing in the streamed page.
+_KEY_VK = {
+    "Backspace": 8,
+    "Tab": 9,
+    "Enter": 13,
+    "Escape": 27,
+    " ": 32,
+    "Spacebar": 32,
+    "Space": 32,
+    "PageUp": 33,
+    "PageDown": 34,
+    "End": 35,
+    "Home": 36,
+    "ArrowLeft": 37,
+    "ArrowUp": 38,
+    "ArrowRight": 39,
+    "ArrowDown": 40,
+    "Delete": 46,
+}
+
+
 async def _dispatch_input(live: _Live, message: dict[str, Any]) -> None:
     cdp = live.cdp
     if cdp is None:
@@ -328,17 +396,35 @@ async def _dispatch_input(live: _Live, message: dict[str, Any]) -> None:
         elif kind == "key":
             action = message.get("action")
             if action == "char":
+                # Legacy single-character message from an older client.
                 await cdp.send("Input.dispatchKeyEvent", {"type": "char", "text": message.get("text") or ""})
             elif action in {"down", "up"}:
-                await cdp.send(
-                    "Input.dispatchKeyEvent",
-                    {
-                        "type": "keyDown" if action == "down" else "keyUp",
-                        "key": message.get("key") or "",
-                        "code": message.get("code") or "",
-                        "text": message.get("text") or "",
-                    },
-                )
+                key = message.get("key") or ""
+                code = message.get("code") or ""
+                text = message.get("text") or ""
+                vk = message.get("vk")
+                if not isinstance(vk, int) or vk <= 0:
+                    vk = _KEY_VK.get(key) or _KEY_VK.get(code) or 0
+                params: dict[str, Any] = {"key": key, "code": code}
+                if vk:
+                    params["windowsVirtualKeyCode"] = vk
+                    params["nativeVirtualKeyCode"] = vk
+                modifiers = message.get("modifiers")
+                if isinstance(modifiers, int) and modifiers:
+                    params["modifiers"] = modifiers
+                if action == "down":
+                    down = dict(params)
+                    if text:
+                        down["text"] = text
+                    # A full keystroke: keyDown (carrying the text) followed
+                    # by char. Segmented one-time-code inputs run their
+                    # state machines on keydown, so a bare char event — what
+                    # the old client sent — left them unable to edit.
+                    await cdp.send("Input.dispatchKeyEvent", {"type": "keyDown", **down})
+                    if text:
+                        await cdp.send("Input.dispatchKeyEvent", {"type": "char", "text": text})
+                else:
+                    await cdp.send("Input.dispatchKeyEvent", {"type": "keyUp", **params})
         elif kind == "resize":
             width = max(320, int(message.get("width") or 1280))
             height = max(240, int(message.get("height") or 800))

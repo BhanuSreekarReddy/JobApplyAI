@@ -100,6 +100,27 @@ class Profile(Base):
     locations: Mapped[str] = mapped_column(Text, default="")
 
 
+class ProfileAnswer(Base):
+    """One saved answer to a repeat application question, stored on the
+    user's profile (the "answer bank"). `key` is a canonical category key
+    (work_authorization, sponsorship, ...) when the question matches a known
+    category, otherwise the normalized question label. The form filler may
+    fill a sensitive/blocklisted field ONLY from a row here — never from a
+    guess. One row per (user, key)."""
+
+    __tablename__ = "profile_answers"
+    __table_args__ = (UniqueConstraint("user_id", "key"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True, default=0)
+    key: Mapped[str] = mapped_column(String, default="")
+    question: Mapped[str] = mapped_column(String, default="")
+    answer: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
 class AdminAuditLog(Base):
     __tablename__ = "admin_audit_log"
 

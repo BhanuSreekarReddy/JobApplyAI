@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from . import answers as profile_answers
 from . import auth, events
 from .agent.apply import apply_to_job
 from .agent.companies import ResolveError, add_company, payload as company_payload, resolve_job_url, sync_starter
@@ -441,6 +442,52 @@ def update_profile(body: ProfileUpdate, request: Request):
         db.commit()
         db.refresh(row)
         return _profile_payload(row)
+    finally:
+        db.close()
+
+
+# ------------------------------------------------------- profile answers
+
+class AnswerItem(BaseModel):
+    key: str
+    question: str = ""
+    answer: str = ""
+
+
+class ProfileAnswersUpdate(BaseModel):
+    items: list[AnswerItem]
+
+
+@app.get("/api/profile/answers")
+def get_profile_answers(request: Request):
+    user = auth.current_user(request)
+    db = SessionLocal()
+    try:
+        return {"answers": profile_answers.list_answers(db, user.id)}
+    finally:
+        db.close()
+
+
+@app.put("/api/profile/answers")
+def put_profile_answers(body: ProfileAnswersUpdate, request: Request):
+    """Upsert saved answers (an item with an empty answer deletes it)."""
+    user = auth.current_user(request)
+    db = SessionLocal()
+    try:
+        items = [item.model_dump() for item in body.items]
+        return {"answers": profile_answers.upsert_answers(db, user.id, items)}
+    finally:
+        db.close()
+
+
+@app.delete("/api/profile/answers")
+def delete_profile_answer(key: str, request: Request):
+    user = auth.current_user(request)
+    db = SessionLocal()
+    try:
+        if not profile_answers.delete_answer(db, user.id, key):
+            raise HTTPException(404, "Saved answer not found")
+        return {"answers": profile_answers.list_answers(db, user.id)}
     finally:
         db.close()
 
@@ -933,6 +980,7 @@ async def fill_application_form(app_id: int, request: Request):
             resume_path=run.resume_path,
             location=primary_location(run.locations),
             packet_key=f"{run.id}-{row.job_id}",
+            answers=profile_answers.answers_map(db, user.id),
         )
         row.status = result["status"]
         row.channel = result["channel"]
@@ -1039,6 +1087,7 @@ async def approve_application(app_id: int, request: Request):
                 resume_path=run.resume_path,
                 location=primary_location(run.locations),
                 packet_key=f"{run.id}-{app.job_id}",
+                answers=profile_answers.answers_map(db, user.id),
             )
         app.status = result["status"]
         app.channel = result["channel"]
@@ -1231,6 +1280,7 @@ async def apply_from_link(body: JobLink, request: Request):
                 resume_path=run.resume_path,
                 location=primary_location(run.locations),
                 packet_key=f"{run.id}-{row.id}",
+                answers=profile_answers.answers_map(db, user.id),
             )
         application = Application(
             run_id=run.id,

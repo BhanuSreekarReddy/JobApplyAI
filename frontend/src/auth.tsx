@@ -410,14 +410,51 @@ type ProfileData = {
   locations: string;
 };
 
+type SavedAnswer = {
+  key: string;
+  question: string;
+  answer: string;
+  sensitive: boolean;
+};
+
+// The repeat questions nearly every application asks. Answers stored here
+// are the only values the agent may use for them — it never guesses.
+const CANONICAL_ANSWER_FIELDS: { key: string; label: string; question: string }[] = [
+  { key: "work_authorization", label: "Work authorization", question: "Are you authorized to work in the US?" },
+  { key: "sponsorship", label: "Sponsorship", question: "Will you now or in the future require sponsorship?" },
+  { key: "citizenship_status", label: "Citizenship status", question: "Citizenship status" },
+  { key: "country", label: "Country", question: "Country" },
+  { key: "work_onsite", label: "Willing to work onsite", question: "Are you willing to work onsite?" },
+  { key: "salary_expectations", label: "Salary expectations", question: "What are your salary expectations?" },
+  { key: "start_date", label: "Earliest start date", question: "What is your earliest start date?" },
+  { key: "how_heard", label: "How you hear about roles", question: "How did you hear about this opportunity?" },
+  { key: "previously_employed", label: "Previously employed by the employer", question: "Have you previously been employed by this company?" },
+  { key: "previously_interviewed", label: "Previously interviewed at the employer", question: "Have you previously interviewed at this company?" },
+  { key: "security_clearance", label: "Security clearance", question: "Do you hold an active security clearance?" },
+];
+
 export function ProfilePage() {
   const [form, setForm] = useState<ProfileData | null>(null);
   const [notice, setNotice] = useState("");
+  const [savedAnswers, setSavedAnswers] = useState<SavedAnswer[]>([]);
+  const [canonical, setCanonical] = useState<Record<string, string>>({});
+  const [answerNotice, setAnswerNotice] = useState("");
 
   useEffect(() => {
     void (async () => {
       const data = await apiJson<ProfileData>("/api/profile");
       setForm(data);
+    })();
+    void (async () => {
+      try {
+        const data = await apiJson<{ answers: SavedAnswer[] }>("/api/profile/answers");
+        setSavedAnswers(data.answers);
+        const map: Record<string, string> = {};
+        for (const a of data.answers) map[a.key] = a.answer;
+        setCanonical(map);
+      } catch {
+        /* the section just stays empty */
+      }
     })();
   }, []);
 
@@ -429,6 +466,48 @@ export function ProfilePage() {
   );
 
   const set = (patch: Partial<ProfileData>) => setForm((f) => (f ? { ...f, ...patch } : f));
+
+  async function saveAnswers(e: FormEvent) {
+    e.preventDefault();
+    try {
+      const data = await apiJson<{ answers: SavedAnswer[] }>("/api/profile/answers", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: CANONICAL_ANSWER_FIELDS.map((f) => ({
+            key: f.key,
+            question: f.question,
+            answer: canonical[f.key] ?? "",
+          })),
+        }),
+      });
+      setSavedAnswers(data.answers);
+      setAnswerNotice("Answers saved. Future application forms will reuse them.");
+    } catch (err) {
+      setAnswerNotice(err instanceof Error ? err.message : "Save failed");
+    }
+  }
+
+  async function deleteAnswer(key: string) {
+    try {
+      const data = await apiJson<{ answers: SavedAnswer[] }>(
+        `/api/profile/answers?key=${encodeURIComponent(key)}`,
+        { method: "DELETE" },
+      );
+      setSavedAnswers(data.answers);
+      setCanonical((c) => {
+        const next = { ...c };
+        delete next[key];
+        return next;
+      });
+    } catch (err) {
+      setAnswerNotice(err instanceof Error ? err.message : "Delete failed");
+    }
+  }
+
+  const otherAnswers = savedAnswers.filter(
+    (a) => !CANONICAL_ANSWER_FIELDS.some((f) => f.key === a.key),
+  );
 
   async function save(e: FormEvent) {
     e.preventDefault();
@@ -524,6 +603,45 @@ export function ProfilePage() {
         {notice ? <p className="notice ok">{notice}</p> : null}
         <button className="primary">Save profile</button>
       </form>
+      <h3 style={{ marginTop: 28 }}>Application answers</h3>
+      <p className="lede">
+        The questions nearly every application asks. Answer them once here and the agent reuses
+        your answers on future forms — it never guesses these, and anything you leave blank is
+        still flagged for you on each form. Answers you save from a live pre-fill session land
+        here too.
+      </p>
+      <form onSubmit={saveAnswers}>
+        {CANONICAL_ANSWER_FIELDS.map((f) => (
+          <div key={f.key}>
+            <label>{f.label}</label>
+            <input
+              type="text"
+              value={canonical[f.key] ?? ""}
+              onChange={(e) => setCanonical((c) => ({ ...c, [f.key]: e.target.value }))}
+            />
+          </div>
+        ))}
+        {answerNotice ? <p className="notice ok">{answerNotice}</p> : null}
+        <button className="primary">Save answers</button>
+      </form>
+      {otherAnswers.length ? (
+        <>
+          <h4 style={{ marginTop: 20 }}>Other saved answers</h4>
+          <div className="jobs">
+            {otherAnswers.map((a) => (
+              <article className="job" key={a.key}>
+                <p className="meta">
+                  <strong>{a.question || a.key}</strong>
+                  {a.sensitive ? " · sensitive" : ""} — {a.answer}
+                </p>
+                <button className="ghost" onClick={() => void deleteAnswer(a.key)}>
+                  Delete
+                </button>
+              </article>
+            ))}
+          </div>
+        </>
+      ) : null}
     </section>
   );
 }

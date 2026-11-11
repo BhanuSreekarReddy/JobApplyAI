@@ -10,6 +10,14 @@ type SessionInfo = {
   notes: string;
 };
 
+type AnswerCandidate = {
+  key: string;
+  question: string;
+  answer: string;
+  sensitive: boolean;
+  selected: boolean;
+};
+
 /**
  * Live streamed pre-fill session. The server runs the employer's form in an
  * ephemeral browser profile and streams it here over a WebSocket (CDP
@@ -27,11 +35,16 @@ export default function PrefillView({
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const wheelAcc = useRef<{ x: number; y: number; deltaX: number; deltaY: number } | null>(null);
+  const wheelRaf = useRef<number | null>(null);
   const [info, setInfo] = useState<SessionInfo | null>(null);
   const [streamState, setStreamState] = useState<"connecting" | "live" | "closed" | "error">(
     "connecting",
   );
   const [closing, setClosing] = useState(false);
+  const [candidates, setCandidates] = useState<AnswerCandidate[] | null>(null);
+  const [answersBusy, setAnswersBusy] = useState(false);
+  const [answersNote, setAnswersNote] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -70,6 +83,53 @@ export default function PrefillView({
     };
   }, [sessionId]);
 
+  // Wheel scrolling needs a NON-passive listener: React attaches onWheel as
+  // passive, so preventDefault() there is ignored and the outer page scrolls
+  // along with the streamed page. Deltas are normalized to pixels first —
+  // deltaMode 1 is lines (Firefox), 2 is pages — and bursts within one
+  // animation frame are coalesced into a single message.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const flush = () => {
+      wheelRaf.current = null;
+      const acc = wheelAcc.current;
+      wheelAcc.current = null;
+      const ws = wsRef.current;
+      if (acc && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "wheel", ...acc }));
+      }
+    };
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      let dx = e.deltaX;
+      let dy = e.deltaY;
+      if (e.deltaMode === 1) {
+        dx *= 16;
+        dy *= 16;
+      } else if (e.deltaMode === 2) {
+        dx *= canvas.width;
+        dy *= canvas.height;
+      }
+      const acc = wheelAcc.current ?? { x: 0, y: 0, deltaX: 0, deltaY: 0 };
+      acc.x = ((e.clientX - rect.left) / rect.width) * canvas.width;
+      acc.y = ((e.clientY - rect.top) / rect.height) * canvas.height;
+      acc.deltaX += dx;
+      acc.deltaY += dy;
+      wheelAcc.current = acc;
+      if (wheelRaf.current === null) wheelRaf.current = requestAnimationFrame(flush);
+    };
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    return () => {
+      canvas.removeEventListener("wheel", onWheel);
+      if (wheelRaf.current !== null) cancelAnimationFrame(wheelRaf.current);
+      wheelRaf.current = null;
+      wheelAcc.current = null;
+    };
+  }, []);
+
   function send(message: Record<string, unknown>) {
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
@@ -91,6 +151,53 @@ export default function PrefillView({
     } finally {
       wsRef.current?.close();
       onClose();
+    }
+  }
+
+  async function loadCandidates() {
+    setAnswersBusy(true);
+    setAnswersNote("");
+    try {
+      const res = await fetch(`/api/prefill-sessions/${sessionId}/answer-candidates`, {
+        method: "POST",
+      });
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      const data = (await res.json()) as {
+        candidates: Omit<AnswerCandidate, "selected">[];
+      };
+      // Sensitive (EEO/demographic) answers are opt-in: unchecked by default.
+      setCandidates(data.candidates.map((c) => ({ ...c, selected: !c.sensitive })));
+    } catch {
+      setAnswersNote("Could not read the form's answers right now.");
+    } finally {
+      setAnswersBusy(false);
+    }
+  }
+
+  async function saveSelectedAnswers() {
+    if (!candidates) return;
+    const chosen = candidates.filter((c) => c.selected);
+    setAnswersBusy(true);
+    try {
+      const res = await fetch(`/api/prefill-sessions/${sessionId}/save-answers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          answers: chosen.map(({ key, question, answer }) => ({ key, question, answer })),
+        }),
+      });
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      const data = (await res.json()) as { saved: unknown[] };
+      setCandidates(null);
+      setAnswersNote(
+        data.saved.length
+          ? `Saved ${data.saved.length} answer(s) to your profile — future applications will reuse them.`
+          : "Nothing was saved.",
+      );
+    } catch {
+      setAnswersNote("Saving failed — your answers are still on the form, nothing was lost.");
+    } finally {
+      setAnswersBusy(false);
     }
   }
 
@@ -163,28 +270,118 @@ export default function PrefillView({
         onMouseMove={(e) => {
           if (e.buttons) send({ type: "mouse", action: "move", ...point(e), button: "left" });
         }}
-        onWheel={(e) => send({ type: "wheel", ...point(e), deltaX: e.deltaX, deltaY: e.deltaY })}
         onKeyDown={(e) => {
-          if (e.key.length === 1) {
-            send({ type: "key", action: "char", text: e.key });
-          } else {
-            send({ type: "key", action: "down", key: e.key, code: e.code, text: "" });
-          }
+          // Full keystrokes, not bare characters: the streamed page's own
+          // keydown handlers (segmented one-time-code boxes especially) need
+          // a real key event with a virtual key code, or entered digits
+          // can't be edited. The server turns "down" with text into a
+          // keyDown + char pair.
+          send({
+            type: "key",
+            action: "down",
+            key: e.key,
+            code: e.code,
+            text: e.key.length === 1 ? e.key : "",
+            vk: e.keyCode,
+            modifiers:
+              (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0),
+          });
           e.preventDefault();
         }}
         onKeyUp={(e) => {
-          if (e.key.length > 1) {
-            send({ type: "key", action: "up", key: e.key, code: e.code, text: "" });
-          }
+          send({
+            type: "key",
+            action: "up",
+            key: e.key,
+            code: e.code,
+            vk: e.keyCode,
+            modifiers:
+              (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0),
+          });
         }}
       />
       <p className="hint">
         Click the form to focus it, then type and click as usual — including the site's own
         Submit button when you are ready.
       </p>
-      <button className="primary" disabled={closing} onClick={() => void closeSession()}>
-        {closing ? "Closing…" : "Close session"}
-      </button>
+      {candidates ? (
+        <div style={{ marginBottom: 12 }}>
+          <h3>Save answers from this form</h3>
+          {candidates.length ? (
+            <>
+              <p className="meta">
+                These are answers you typed yourself. Checked ones are saved to your profile and
+                reused on future applications. Sensitive questions (EEO/demographic) are left
+                unchecked — tick one only if you want it stored. One-time codes and passwords
+                are never saved.
+              </p>
+              {candidates.map((c) => (
+                <label
+                  key={c.key}
+                  style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 6 }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={c.selected}
+                    onChange={(e) =>
+                      setCandidates((list) =>
+                        list
+                          ? list.map((x) =>
+                              x.key === c.key ? { ...x, selected: e.target.checked } : x,
+                            )
+                          : list,
+                      )
+                    }
+                  />
+                  <span>
+                    <strong>{c.question}</strong>
+                    {c.sensitive ? " (sensitive)" : ""} — {c.answer}
+                  </span>
+                </label>
+              ))}
+              <div className="row">
+                <button
+                  className="primary"
+                  disabled={answersBusy}
+                  onClick={() => void saveSelectedAnswers()}
+                >
+                  Save selected answers
+                </button>
+                <button
+                  className="ghost"
+                  disabled={answersBusy}
+                  onClick={() => setCandidates(null)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="meta">
+                Nothing new to save — everything with a value on this form was filled by the
+                agent, and the rest is still empty.
+              </p>
+              <button className="ghost" onClick={() => setCandidates(null)}>
+                Dismiss
+              </button>
+            </>
+          )}
+        </div>
+      ) : null}
+      {answersNote ? <p className="notice ok">{answersNote}</p> : null}
+      <div className="row">
+        <button
+          className="ghost"
+          disabled={streamState !== "live" || answersBusy}
+          onClick={() => void loadCandidates()}
+        >
+          {answersBusy ? "Working…" : "Save answers from this form"}
+        </button>
+        <button className="primary" disabled={closing} onClick={() => void closeSession()}>
+          {closing ? "Closing…" : "Close session"}
+        </button>
+      </div>
     </section>
   );
 }
