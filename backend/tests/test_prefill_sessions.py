@@ -186,6 +186,22 @@ def test_session_fill_records_seen(form_server):
         assert client.post(f"/api/prefill-sessions/{session['id']}/close").status_code == 200
 
 
+def test_session_fill_does_not_advance_stage(form_server):
+    """A streamed pre-fill fills the form but submits nothing — the user
+    still clicks Submit — so the tracker stage must stay "not_applied"
+    even though the application status becomes "filled"."""
+    email = _unique_email("pfstage")
+    user_id = _make_user(email)
+    app_id = _make_application(user_id, form_server)
+    with _logged_in(email) as client:
+        session = _create_session(client, app_id)
+        with SessionLocal() as db:
+            app = db.get(Application, app_id)
+            assert app.status == "filled"
+            assert app.pipeline_stage == "not_applied"
+        assert client.post(f"/api/prefill-sessions/{session['id']}/close").status_code == 200
+
+
 def test_close_wipes_the_ephemeral_profile(form_server):
     email = _unique_email("pfwipe")
     user_id = _make_user(email)

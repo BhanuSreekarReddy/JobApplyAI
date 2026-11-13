@@ -23,7 +23,7 @@ _ADDED_COLUMNS = [
     ("runs", "browser_fill", "INTEGER DEFAULT 0"),
     ("runs", "user_id", "INTEGER"),
     ("job_matches", "posted_date", "VARCHAR DEFAULT ''"),
-    ("applications", "pipeline_stage", "VARCHAR DEFAULT 'applied'"),
+    ("applications", "pipeline_stage", "VARCHAR DEFAULT 'not_applied'"),
     ("applications", "user_notes", "TEXT DEFAULT ''"),
     ("applications", "follow_up_date", "VARCHAR DEFAULT ''"),
     ("applications", "user_id", "INTEGER"),
@@ -45,6 +45,29 @@ def upgrade_schema() -> None:
             cols = {c["name"] for c in inspector.get_columns(table)}
             if column not in cols:
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+        # Correct pipeline stages stamped by the old default: every packet
+        # used to start at "applied", even ones that were never submitted.
+        # An "applied" stage (or an unset one) only survives on rows whose
+        # status is "applied" — the one status that means the application
+        # actually went out. Stages the user moved past "applied"
+        # themselves are never touched. Idempotent: corrected rows no
+        # longer match either statement, so later startups are no-ops.
+        if "applications" in tables:
+            cols = {c["name"] for c in inspect(conn).get_columns("applications")}
+            if {"pipeline_stage", "status"} <= cols:
+                conn.execute(
+                    text(
+                        "UPDATE applications SET pipeline_stage = 'not_applied' "
+                        "WHERE COALESCE(pipeline_stage, '') IN ('', 'applied') "
+                        "AND COALESCE(status, '') <> 'applied'"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "UPDATE applications SET pipeline_stage = 'applied' "
+                        "WHERE COALESCE(pipeline_stage, '') = '' AND status = 'applied'"
+                    )
+                )
         # Backfill the first/last split for profiles stored before the
         # split existed. Idempotent: rows that already carry a split are
         # left alone, so this is a no-op on every later startup.

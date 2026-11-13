@@ -57,6 +57,7 @@ type Application = {
 };
 
 const STAGES: { value: string; label: string }[] = [
+  { value: "not_applied", label: "Not applied" },
   { value: "applied", label: "Applied" },
   { value: "reply", label: "Recruiter reply" },
   { value: "screen", label: "Screen" },
@@ -317,7 +318,7 @@ function Workspace({
         rows.map((a) => [
           a.id,
           {
-            stage: a.pipeline_stage || "applied",
+            stage: a.pipeline_stage || "not_applied",
             user_notes: a.user_notes || "",
             follow_up_date: a.follow_up_date || "",
           },
@@ -792,7 +793,7 @@ function Workspace({
             ) : (
               sortedHistory.map((app) => {
                 const draft = trackerDrafts[app.id] ?? {
-                  stage: app.pipeline_stage || "applied",
+                  stage: app.pipeline_stage || "not_applied",
                   user_notes: app.user_notes || "",
                   follow_up_date: app.follow_up_date || "",
                 };

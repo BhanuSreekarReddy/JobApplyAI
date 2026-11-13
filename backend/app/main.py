@@ -23,7 +23,7 @@ from .agent.materials import cover_letter
 from .agent.profile import heuristic_profile, split_name
 from .agent.resume import extract_text
 from .agent.runner import execute_run, primary_location, _app_payload, _job_payload, _public_profile, _upsert_profile
-from .agent.seen import record_application_seen
+from .agent.seen import advance_stage_on_submission, record_application_seen
 from .config import UPLOAD_DIR, settings
 from .db import Base, SessionLocal, engine, upgrade_schema
 from .models import (
@@ -990,8 +990,11 @@ def list_applications(request: Request):
 def _record_application_seen(db, application, job_row, status: str) -> None:
     """Record an application that was actually sent, prepared, filled, or skipped as
     seen, so future runs skip the job. Called only once an application's
-    outcome is known; failed applications record nothing."""
+    outcome is known; failed applications record nothing. A genuine
+    submission (status "applied") also moves the tracker stage off
+    "not_applied"; prepared/filled/skipped outcomes leave it alone."""
     record_application_seen(db, application, job_row, status)
+    advance_stage_on_submission(db, application, status)
 
 
 @app.post("/api/applications/{app_id}/fill")
@@ -1353,7 +1356,7 @@ async def apply_from_link(body: JobLink, request: Request):
         db.close()
 
 
-PIPELINE_STAGES = {"applied", "reply", "screen", "interview", "offer", "rejected", "ghosted"}
+PIPELINE_STAGES = {"not_applied", "applied", "reply", "screen", "interview", "offer", "rejected", "ghosted"}
 
 
 class TrackerUpdate(BaseModel):

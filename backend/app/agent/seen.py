@@ -64,6 +64,28 @@ def record_application_seen(db: Session, application, job, status: str) -> None:
     )
 
 
+# The one application status that means the application actually went out:
+# the user marked it submitted, or the approval email really was sent.
+# "filled" only means a browser form was pre-filled — nothing was submitted,
+# the user still clicks Submit — and "prepared" is a packet nobody sent.
+SUBMITTED_STATUS = "applied"
+
+
+def advance_stage_on_submission(db: Session, application, status: str) -> None:
+    """Move a newly submitted application into the tracker's pipeline.
+
+    Called alongside record_application_seen from every outcome path. Only a
+    genuine submission (status "applied") advances the stage, and only from
+    "not_applied" — a stage the user has since moved further along (screen,
+    interview, ...) is theirs and is never overwritten."""
+    if status != SUBMITTED_STATUS:
+        return
+    if (application.pipeline_stage or "not_applied") != "not_applied":
+        return
+    application.pipeline_stage = "applied"
+    db.commit()
+
+
 def record_seen(db: Session, run_id: str, job: dict[str, Any], status: str, user_id: int | None = None) -> SeenJob:
     """Record a prepared or sent application. Re-recording only refreshes the
     status and run; the original first-seen date is kept."""

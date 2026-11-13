@@ -209,8 +209,11 @@ class Application(Base):
     apply_url: Mapped[str] = mapped_column(String, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     # Pipeline tracking, edited by the user in the tracker tab. `notes` stays
-    # as the system's note; `user_notes` is the user's own free text.
-    pipeline_stage: Mapped[str] = mapped_column(String, default="applied")
+    # as the system's note; `user_notes` is the user's own free text. A packet
+    # starts at "not_applied": preparing or pre-filling a form does not mean
+    # the user applied. The stage becomes "applied" only on a real submission
+    # (see agent.seen.advance_stage_on_submission).
+    pipeline_stage: Mapped[str] = mapped_column(String, default="not_applied")
     user_notes: Mapped[str] = mapped_column(Text, default="")
     follow_up_date: Mapped[str] = mapped_column(String, default="")
 

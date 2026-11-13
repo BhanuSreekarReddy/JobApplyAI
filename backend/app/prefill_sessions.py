@@ -33,7 +33,7 @@ from . import answers as profile_answers
 from . import auth
 from .agent import formfill
 from .agent.runner import primary_location
-from .agent.seen import record_application_seen
+from .agent.seen import advance_stage_on_submission, record_application_seen
 from .config import DATA_DIR
 from .db import SessionLocal
 from .models import Application, JobMatch, PrefillSessionRecord, Run
@@ -261,6 +261,10 @@ async def create_prefill_session(body: CreateSession, request: Request):
             db.commit()
             job = db.get(JobMatch, application.job_id) if application.job_id else None
             record_application_seen(db, application, job, application.status)
+            # A pre-fill outcome ("filled"/"prepared") is not a submission —
+            # the user still clicks Submit — so this only fires if a session
+            # outcome ever becomes a genuine "applied".
+            advance_stage_on_submission(db, application, application.status)
         payload = _payload(record)
     finally:
         db.close()
