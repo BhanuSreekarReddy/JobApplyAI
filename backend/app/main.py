@@ -1403,3 +1403,11 @@ def list_seen_jobs(request: Request):
         ]
     finally:
         db.close()
+
+
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
+
+frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+if frontend_dist.exists():
+    app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="frontend")
