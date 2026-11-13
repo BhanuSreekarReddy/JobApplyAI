@@ -20,10 +20,10 @@ from .agent.apply import apply_to_job
 from .agent.companies import ResolveError, add_company, payload as company_payload, resolve_job_url, sync_starter
 from .agent.formfill import fill_application, shutdown_browser
 from .agent.materials import cover_letter
-from .agent.profile import heuristic_profile
+from .agent.profile import heuristic_profile, split_name
 from .agent.resume import extract_text
 from .agent.runner import execute_run, primary_location, _app_payload, _job_payload, _public_profile, _upsert_profile
-from .agent.seen import record_seen
+from .agent.seen import record_application_seen
 from .config import UPLOAD_DIR, settings
 from .db import Base, SessionLocal, engine, upgrade_schema
 from .models import (
@@ -410,8 +410,17 @@ def _profile_payload(row: Profile) -> dict:
         except _json.JSONDecodeError:
             return []
 
+    first = row.first_name or ""
+    last = row.last_name or ""
+    if not first and not last and row.name:
+        # A profile stored before the split existed and not yet backfilled:
+        # derive the split on read so the API is always consistent.
+        first, last = split_name(row.name)
+    full = row.name or " ".join(p for p in (first, last) if p)
     return {
-        "name": row.name or "",
+        "name": full,
+        "first_name": first,
+        "last_name": last,
         "contact_email": row.contact_email or "",
         "phone": row.phone or "",
         "linkedin": row.linkedin or "",
@@ -425,7 +434,8 @@ def _profile_payload(row: Profile) -> dict:
 
 
 _EMPTY_PROFILE = {
-    "name": "", "contact_email": "", "phone": "", "linkedin": "", "github": "",
+    "name": "", "first_name": "", "last_name": "", "contact_email": "", "phone": "",
+    "linkedin": "", "github": "",
     "titles": [], "skills": [], "years_experience": None, "summary": "", "locations": "",
 }
 
@@ -443,6 +453,8 @@ def get_profile(request: Request):
 
 class ProfileUpdate(BaseModel):
     name: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
     contact_email: str | None = None
     phone: str | None = None
     linkedin: str | None = None
@@ -463,7 +475,22 @@ def update_profile(body: ProfileUpdate, request: Request):
         if row is None:
             row = Profile(user_id=user.id)
             db.add(row)
-        for field in ("name", "contact_email", "phone", "linkedin", "github", "summary", "locations"):
+        if body.first_name is not None or body.last_name is not None:
+            # Split fields are authoritative: the full name is derived.
+            # Seed from the stored full name first so a partial update of a
+            # not-yet-split profile does not drop the other half.
+            if not row.first_name and not row.last_name and row.name:
+                row.first_name, row.last_name = split_name(row.name)
+            if body.first_name is not None:
+                row.first_name = body.first_name.strip()
+            if body.last_name is not None:
+                row.last_name = body.last_name.strip()
+            row.name = " ".join(p for p in (row.first_name, row.last_name) if p)
+        elif body.name is not None:
+            # A caller sending only the full name gets the split derived.
+            row.name = body.name.strip()
+            row.first_name, row.last_name = split_name(row.name)
+        for field in ("contact_email", "phone", "linkedin", "github", "summary", "locations"):
             value = getattr(body, field)
             if value is not None:
                 setattr(row, field, value)
@@ -964,20 +991,7 @@ def _record_application_seen(db, application, job_row, status: str) -> None:
     """Record an application that was actually sent, prepared, filled, or skipped as
     seen, so future runs skip the job. Called only once an application's
     outcome is known; failed applications record nothing."""
-    if status not in {"applied", "prepared", "filled", "skipped"}:
-        return
-    record_seen(
-        db,
-        application.run_id,
-        {
-            "external_id": job_row.external_id if job_row else "",
-            "title": application.title,
-            "company": application.company,
-            "url": job_row.url if job_row else application.apply_url,
-        },
-        status,
-        application.user_id,
-    )
+    record_application_seen(db, application, job_row, status)
 
 
 @app.post("/api/applications/{app_id}/fill")
@@ -1048,6 +1062,9 @@ def update_application(app_id: int, body: ApplicationUpdate, request: Request):
                 row.notes = "Submitted by you on the employer site. " + (row.notes or "")
         db.commit()
         db.refresh(row)
+        if body.status is not None:
+            job_row = db.get(JobMatch, row.job_id) if row.job_id else None
+            _record_application_seen(db, row, job_row, body.status)
         return _app_payload(row)
     finally:
         db.close()

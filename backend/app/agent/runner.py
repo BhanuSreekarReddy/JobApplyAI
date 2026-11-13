@@ -21,6 +21,11 @@ def _upsert_profile(db: Session, run: Run, profile: dict[str, Any]) -> None:
         row = Profile(user_id=run.user_id)
         db.add(row)
     row.name = profile.get("name") or row.name or ""
+    if profile.get("first_name") or profile.get("last_name"):
+        row.first_name = profile.get("first_name") or ""
+        row.last_name = profile.get("last_name") or ""
+    elif profile.get("name"):
+        row.first_name, row.last_name = split_name(profile["name"])
     row.contact_email = profile.get("email") or row.contact_email or ""
     row.phone = profile.get("phone") or row.phone or ""
     row.linkedin = profile.get("linkedin") or row.linkedin or ""
@@ -37,7 +42,7 @@ from .companies import enabled_boards, relocate, sync_starter
 from .locations import parse_locations
 from .match import rank_jobs
 from .materials import cover_letter
-from .profile import enhance_with_llm, heuristic_profile
+from .profile import enhance_with_llm, heuristic_profile, split_name
 from .resume import extract_text
 from .search import search_jobs
 from .seen import is_seen

@@ -89,6 +89,8 @@ class Profile(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(Integer, unique=True, index=True, default=0)
     name: Mapped[str] = mapped_column(String, default="")
+    first_name: Mapped[str] = mapped_column(String, default="")
+    last_name: Mapped[str] = mapped_column(String, default="")
     contact_email: Mapped[str] = mapped_column(String, default="")
     phone: Mapped[str] = mapped_column(String, default="")
     linkedin: Mapped[str] = mapped_column(String, default="")

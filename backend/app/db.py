@@ -29,6 +29,8 @@ _ADDED_COLUMNS = [
     ("applications", "user_id", "INTEGER"),
     ("seen_jobs", "user_id", "INTEGER"),
     ("companies", "user_id", "INTEGER"),
+    ("profiles", "first_name", "VARCHAR DEFAULT ''"),
+    ("profiles", "last_name", "VARCHAR DEFAULT ''"),
 ]
 
 
@@ -43,6 +45,28 @@ def upgrade_schema() -> None:
             cols = {c["name"] for c in inspector.get_columns(table)}
             if column not in cols:
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+        # Backfill the first/last split for profiles stored before the
+        # split existed. Idempotent: rows that already carry a split are
+        # left alone, so this is a no-op on every later startup.
+        if "profiles" in tables:
+            cols = {c["name"] for c in inspect(conn).get_columns("profiles")}
+            if {"name", "first_name", "last_name"} <= cols:
+                from .agent.profile import split_name
+
+                rows = conn.execute(
+                    text(
+                        "SELECT id, name FROM profiles "
+                        "WHERE COALESCE(first_name, '') = '' "
+                        "AND COALESCE(last_name, '') = '' "
+                        "AND COALESCE(name, '') <> ''"
+                    )
+                ).fetchall()
+                for row_id, full_name in rows:
+                    first, last = split_name(full_name)
+                    conn.execute(
+                        text("UPDATE profiles SET first_name = :f, last_name = :l WHERE id = :i"),
+                        {"f": first, "l": last, "i": row_id},
+                    )
 
 
 def get_db():

@@ -1154,14 +1154,24 @@ def _values(
     answers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     name = (profile.get("name") or "").strip()
-    parts = name.split()
+    first_name = (profile.get("first_name") or "").strip()
+    last_name = (profile.get("last_name") or "").strip()
+    if first_name or last_name:
+        # The stored split wins; a single full-name field gets the stored
+        # full name, or the parts recombined when only they are known.
+        if not name:
+            name = " ".join(p for p in (first_name, last_name) if p)
+    else:
+        parts = name.split()
+        first_name = parts[0] if parts else ""
+        last_name = " ".join(p for p in parts[1:] if not re.fullmatch(r"[A-Za-z]\.?", p))
     github = _url(profile.get("github"))
     years = profile.get("years_experience")
     values: dict[str, Any] = {
         "email": profile.get("email") or "",
         "full_name": name,
-        "first_name": parts[0] if parts else "",
-        "last_name": " ".join(p for p in parts[1:] if not re.fullmatch(r"[A-Za-z]\.?", p)),
+        "first_name": first_name,
+        "last_name": last_name,
         "phone": profile.get("phone") or "",
         "linkedin": _url(profile.get("linkedin")),
         "github": github,

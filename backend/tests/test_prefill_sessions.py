@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 
 from app import auth, main
 from app.db import SessionLocal
-from app.models import Application, PrefillSessionRecord, Run, User
+from app.models import Application, PrefillSessionRecord, Run, SeenJob, User
 
 PASSWORD = "TestPass123!"
 
@@ -162,6 +162,27 @@ def test_second_concurrent_session_is_409(form_server):
         session = _create_session(client, app_id)
         r = client.post("/api/prefill-sessions", json={"application_id": app_id})
         assert r.status_code == 409
+        assert client.post(f"/api/prefill-sessions/{session['id']}/close").status_code == 200
+
+
+def test_session_fill_records_seen(form_server):
+    """A streamed pre-fill moves the application to 'filled'; that outcome
+    must also land in Previously applied, like the local fill path does."""
+    email = _unique_email("pfseen")
+    user_id = _make_user(email)
+    app_id = _make_application(user_id, form_server)
+    with _logged_in(email) as client:
+        session = _create_session(client, app_id)
+        with SessionLocal() as db:
+            app = db.get(Application, app_id)
+            assert app.status == "filled"
+            rows = db.query(SeenJob).filter(SeenJob.user_id == user_id).all()
+            assert len(rows) == 1
+            assert rows[0].status == "filled"
+            assert rows[0].title == "Software Engineer"
+            assert rows[0].run_id == app.run_id
+        listed = client.get("/api/seen").json()
+        assert any(r["status"] == "filled" for r in listed)
         assert client.post(f"/api/prefill-sessions/{session['id']}/close").status_code == 200
 
 

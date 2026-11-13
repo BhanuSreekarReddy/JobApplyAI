@@ -464,6 +464,8 @@ export function ResetPage({ go }: { go: (page: AuthPage) => void }) {
 
 type ProfileData = {
   name: string;
+  first_name: string;
+  last_name: string;
   contact_email: string;
   phone: string;
   linkedin: string;
@@ -600,8 +602,24 @@ export function ProfilePage() {
         it from the resume's extracted details; edits here are kept until the next run.
       </p>
       <form onSubmit={save}>
-        <label>Full name</label>
-        <input type="text" value={form.name} onChange={(e) => set({ name: e.target.value })} />
+        <div className="row">
+          <div>
+            <label>First name</label>
+            <input
+              type="text"
+              value={form.first_name}
+              onChange={(e) => set({ first_name: e.target.value })}
+            />
+          </div>
+          <div>
+            <label>Last name</label>
+            <input
+              type="text"
+              value={form.last_name}
+              onChange={(e) => set({ last_name: e.target.value })}
+            />
+          </div>
+        </div>
         <label>Contact email</label>
         <input
           type="email"

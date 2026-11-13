@@ -37,6 +37,33 @@ def is_seen(db: Session, job: dict[str, Any], user_id: int | None = None) -> boo
     return find_seen(db, job, user_id) is not None
 
 
+# Application outcomes that count as "previously applied": the job was
+# actually sent, prepared, filled, or deliberately skipped. Anything else
+# (pending_review, failed, ...) records nothing.
+RECORDED_STATUSES = {"applied", "prepared", "filled", "skipped"}
+
+
+def record_application_seen(db: Session, application, job, status: str) -> None:
+    """Record an application whose outcome is known as seen, so future runs
+    skip the job. Every path that moves an application to an outcome status
+    must call this — approve, skip, local fill, the streamed pre-fill
+    session, and manual status marks from the tracker."""
+    if status not in RECORDED_STATUSES:
+        return
+    record_seen(
+        db,
+        application.run_id,
+        {
+            "external_id": job.external_id if job else "",
+            "title": application.title,
+            "company": application.company,
+            "url": job.url if job else application.apply_url,
+        },
+        status,
+        application.user_id,
+    )
+
+
 def record_seen(db: Session, run_id: str, job: dict[str, Any], status: str, user_id: int | None = None) -> SeenJob:
     """Record a prepared or sent application. Re-recording only refreshes the
     status and run; the original first-seen date is kept."""

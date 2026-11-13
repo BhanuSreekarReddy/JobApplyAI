@@ -33,6 +33,7 @@ from . import answers as profile_answers
 from . import auth
 from .agent import formfill
 from .agent.runner import primary_location
+from .agent.seen import record_application_seen
 from .config import DATA_DIR
 from .db import SessionLocal
 from .models import Application, JobMatch, PrefillSessionRecord, Run
@@ -258,6 +259,8 @@ async def create_prefill_session(body: CreateSession, request: Request):
             application.channel = result.get("channel") or application.channel
             application.notes = result.get("notes") or application.notes
             db.commit()
+            job = db.get(JobMatch, application.job_id) if application.job_id else None
+            record_application_seen(db, application, job, application.status)
         payload = _payload(record)
     finally:
         db.close()
