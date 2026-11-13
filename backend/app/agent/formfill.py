@@ -51,8 +51,6 @@ ANSWER_RULES: list[tuple[str, re.Pattern[str]]] = [
     ("sponsorship", re.compile(r"sponsor")),
     ("citizenship_status", re.compile(r"citizen")),
     ("work_authorization", re.compile(r"authori[sz]|eligible to work|legally entitled to work|work permit")),
-    ("previously_interviewed", re.compile(r"interviewed|prior interview")),
-    ("previously_employed", re.compile(r"previously employed|previously worked|former employee|been employed by|ever worked (for|at|here)")),
     ("how_heard", re.compile(r"hear about|how did you (hear|find|learn)|\breferr")),
     ("salary_expectations", re.compile(r"salary|compensation|expected pay|pay expectation|desired pay")),
     ("start_date", re.compile(r"start date|when can you start|earliest.{0,20}start|available to start|notice period")),

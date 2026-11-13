@@ -463,10 +463,10 @@ function Workspace({
         </div>
         <div className="tabs">
           <button className={tab === "run" ? "active" : ""} onClick={() => setTab("run")}>
-            Find jobs
+            Jobs
           </button>
           <button className={tab === "tracker" ? "active" : ""} onClick={() => void loadTracker()}>
-            My applications{review.length > 0 ? ` (${review.length})` : ""}
+            Applications{review.length > 0 ? ` (${review.length})` : ""}
           </button>
           <button className={tab === "companies" ? "active" : ""} onClick={() => setTab("companies")}>
             Companies
@@ -479,7 +479,7 @@ function Workspace({
           <div className="account">
             <button className={tab === "profile" ? "active" : ""} onClick={() => setMenuOpen((o) => !o)}>
               {user.email}
-              {user.email_verified ? "" : " (unverified)"} ▾
+              {user.email_verified ? "" : " (unverified)"}
             </button>
             {menuOpen ? (
               <div className="account-menu">

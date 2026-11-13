@@ -428,8 +428,6 @@ const CANONICAL_ANSWER_FIELDS: { key: string; label: string; question: string }[
   { key: "salary_expectations", label: "Salary expectations", question: "What are your salary expectations?" },
   { key: "start_date", label: "Earliest start date", question: "What is your earliest start date?" },
   { key: "how_heard", label: "How you hear about roles", question: "How did you hear about this opportunity?" },
-  { key: "previously_employed", label: "Previously employed by the employer", question: "Have you previously been employed by this company?" },
-  { key: "previously_interviewed", label: "Previously interviewed at the employer", question: "Have you previously interviewed at this company?" },
   { key: "security_clearance", label: "Security clearance", question: "Do you hold an active security clearance?" },
 ];
 
