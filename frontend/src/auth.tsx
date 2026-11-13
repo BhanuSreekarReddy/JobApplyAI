@@ -34,6 +34,43 @@ async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+export function ResendVerification({ email }: { email: string }) {
+  const [notice, setNotice] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function resend() {
+    if (!email) {
+      setNotice("Enter your email address first, then resend.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await apiJson("/api/auth/resend-verification", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      // The endpoint always answers the same way, account or not.
+      setNotice(
+        "If that email has an unverified account, a new verification link is on its way.",
+      );
+    } catch {
+      setNotice("Could not request a new link right now. Try again in a minute.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <button type="button" className="ghost" onClick={() => void resend()} disabled={busy}>
+        {busy ? "Sending…" : "Resend verification email"}
+      </button>
+      {notice ? <p className="notice ok">{notice}</p> : null}
+    </>
+  );
+}
+
 async function errorText(res: Response): Promise<string> {
   try {
     const body = await res.json();
@@ -195,39 +232,57 @@ export function LoginPage({
           Register with an invite
         </button>
       </p>
+      <p className="meta">
+        Didn't get the verification email?
+        <ResendVerification email={email} />
+      </p>
     </AuthShell>
   );
 }
 
-export function RegisterPage({
-  go,
-  onSignedIn,
-}: {
-  go: (page: AuthPage) => void;
-  onSignedIn: (user: AuthUser) => void;
-}) {
+export function RegisterPage({ go }: { go: (page: AuthPage) => void }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [invite, setInvite] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     setBusy(true);
     setError("");
     try {
-      const user = await apiJson<AuthUser>("/api/auth/register", {
+      await apiJson("/api/auth/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password, invite_code: invite }),
       });
-      onSignedIn(user);
+      // Registration no longer signs in: the address must be verified first.
+      setDone(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Registration failed");
     } finally {
       setBusy(false);
     }
+  }
+
+  if (done) {
+    return (
+      <AuthShell title="Check your inbox" go={go}>
+        <p className="notice ok">
+          Account created. We've emailed a verification link to {email} — open it to verify
+          your address, then sign in.
+        </p>
+        <button className="primary" onClick={() => go("login")}>
+          Continue to sign in
+        </button>
+        <p className="meta">
+          Didn't get it?
+          <ResendVerification email={email} />
+        </p>
+      </AuthShell>
+    );
   }
 
   return (
@@ -301,7 +356,17 @@ export function VerifyPage({ go }: { go: (page: AuthPage) => void }) {
           </button>
         </>
       ) : null}
-      {state === "error" ? <p className="notice error">{message}</p> : null}
+      {state === "error" ? (
+        <>
+          <p className="notice error">{message}</p>
+          <p className="meta">
+            If the link expired, you can request a new one from the sign-in page.
+          </p>
+          <button className="ghost" onClick={() => go("login")}>
+            Back to sign in
+          </button>
+        </>
+      ) : null}
     </AuthShell>
   );
 }
@@ -428,8 +493,10 @@ const CANONICAL_ANSWER_FIELDS: { key: string; label: string; question: string }[
   { key: "salary_expectations", label: "Salary expectations", question: "What are your salary expectations?" },
   { key: "start_date", label: "Earliest start date", question: "What is your earliest start date?" },
   { key: "how_heard", label: "How you hear about roles", question: "How did you hear about this opportunity?" },
-  { key: "previously_employed", label: "Previously employed by the employer", question: "Have you previously been employed by this company?" },
-  { key: "previously_interviewed", label: "Previously interviewed at the employer", question: "Have you previously interviewed at this company?" },
+  // "Previously employed/interviewed at this employer" are deliberately NOT
+  // standard fields: the answer differs per company, so a single saved value
+  // would be wrong on most forms. Answers captured for them in a live
+  // session still land in the bank (under Other saved answers).
   { key: "security_clearance", label: "Security clearance", question: "Do you hold an active security clearance?" },
 ];
 
