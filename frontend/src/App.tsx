@@ -463,10 +463,10 @@ function Workspace({
         </div>
         <div className="tabs">
           <button className={tab === "run" ? "active" : ""} onClick={() => setTab("run")}>
-            Find jobs
+            Jobs
           </button>
           <button className={tab === "tracker" ? "active" : ""} onClick={() => void loadTracker()}>
-            My applications{review.length > 0 ? ` (${review.length})` : ""}
+            Applications{review.length > 0 ? ` (${review.length})` : ""}
           </button>
           <button className={tab === "companies" ? "active" : ""} onClick={() => setTab("companies")}>
             Companies
@@ -479,7 +479,7 @@ function Workspace({
           <div className="account">
             <button className={tab === "profile" ? "active" : ""} onClick={() => setMenuOpen((o) => !o)}>
               {user.email}
-              {user.email_verified ? "" : " (unverified)"} ▾
+              {user.email_verified ? "" : " (unverified)"}
             </button>
             {menuOpen ? (
               <div className="account-menu">
@@ -719,7 +719,7 @@ function Workspace({
         </div>
       ) : tab === "tracker" ? (
         <section className="card">
-          <h2>My applications</h2>
+          <h2>Applications</h2>
           <p className="lede">Every packet the agent prepared or sent, newest first.</p>
           <div className="tabs small" style={{ marginBottom: 16 }}>
             <button
@@ -929,7 +929,7 @@ export default function Root() {
     case "login":
       return <LoginPage go={setPage} onSignedIn={setUser} />;
     case "register":
-      return <RegisterPage go={setPage} onSignedIn={setUser} />;
+      return <RegisterPage go={setPage} />;
     case "forgot":
       return <ForgotPage go={setPage} />;
     default:
