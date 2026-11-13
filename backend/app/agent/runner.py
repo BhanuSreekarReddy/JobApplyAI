@@ -8,7 +8,31 @@ import httpx
 from sqlalchemy.orm import Session
 
 from .. import events
-from ..models import Application, Company, JobMatch, Run
+from ..models import Application, Company, JobMatch, Profile, Run
+
+
+def _upsert_profile(db: Session, run: Run, profile: dict[str, Any]) -> None:
+    """Keep the owner's persistent Profile in step with what the extractor
+    found in this run's resume."""
+    if not run.user_id:
+        return
+    row = db.query(Profile).filter(Profile.user_id == run.user_id).first()
+    if row is None:
+        row = Profile(user_id=run.user_id)
+        db.add(row)
+    row.name = profile.get("name") or row.name or ""
+    row.contact_email = profile.get("email") or row.contact_email or ""
+    row.phone = profile.get("phone") or row.phone or ""
+    row.linkedin = profile.get("linkedin") or row.linkedin or ""
+    row.github = profile.get("github") or row.github or ""
+    row.titles = json.dumps(profile.get("titles") or [])
+    row.skills = json.dumps(profile.get("skills") or [])
+    if profile.get("years_experience") is not None:
+        row.years_experience = int(profile["years_experience"])
+    row.summary = profile.get("summary") or row.summary or ""
+    if run.locations:
+        row.locations = run.locations
+    db.commit()
 from .companies import enabled_boards, relocate, sync_starter
 from .locations import parse_locations
 from .match import rank_jobs
@@ -50,7 +74,8 @@ async def execute_run(db: Session, run: Run) -> None:
             },
         )
         sync_starter(db)
-        tracked = enabled_boards(db)
+        tracked = enabled_boards(db, run.user_id)
+        _upsert_profile(db, run, profile)
 
         async def progress(message: str) -> None:
             await events.publish(run_id, {"type": "status", "message": message})
@@ -92,7 +117,7 @@ async def execute_run(db: Session, run: Run) -> None:
         seen_count = 0
         fresh = []
         for job in keep:
-            if is_seen(db, job):
+            if is_seen(db, job, run.user_id):
                 seen_count += 1
             else:
                 fresh.append(job)
@@ -146,6 +171,7 @@ async def execute_run(db: Session, run: Run) -> None:
             # approval time, not here.
             app = Application(
                 run_id=run_id,
+                user_id=run.user_id,
                 job_id=row.id,
                 title=row.title,
                 company=row.company,

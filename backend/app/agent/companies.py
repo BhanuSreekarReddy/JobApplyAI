@@ -48,8 +48,12 @@ def sync_starter(db: Session) -> int:
     return added
 
 
-def enabled_boards(db: Session) -> list[tuple[Company, Board]]:
-    rows = db.query(Company).filter(Company.enabled == 1).order_by(Company.name).all()
+def enabled_boards(db: Session, user_id: int | None = None) -> list[tuple[Company, Board]]:
+    query = db.query(Company).filter(Company.enabled == 1)
+    if user_id is not None:
+        # A user's searches cover the global starter list plus their own adds.
+        query = query.filter((Company.user_id.is_(None)) | (Company.user_id == user_id))
+    rows = query.order_by(Company.name).all()
     return [(c, Board(c.ats, c.slug, c.name)) for c in rows]
 
 
@@ -172,22 +176,34 @@ def _workday_name(ref: AtsRef) -> str:
     return tenant.replace("-", " ").title()
 
 
-async def add_company(db: Session, client: httpx.AsyncClient, text: str, use_browser: bool = True) -> tuple[Company, bool]:
-    """Resolve and store a company. Returns (company, created)."""
+async def add_company(
+    db: Session, client: httpx.AsyncClient, text: str, use_browser: bool = True, user_id: int | None = None
+) -> tuple[Company, bool]:
+    """Resolve and store a company. Returns (company, created). Companies are
+    looked up among the rows the user can see (global + their own)."""
+    visible = db.query(Company)
+    if user_id is not None:
+        visible = visible.filter((Company.user_id.is_(None)) | (Company.user_id == user_id))
     key = re.sub(r"[^a-z0-9]", "", (text or "").lower())
     known = None
     if key and not _is_url(text):
-        known = next((c for c in db.query(Company).all() if re.sub(r"[^a-z0-9]", "", c.name.lower()) == key), None)
+        known = next((c for c in visible.all() if re.sub(r"[^a-z0-9]", "", c.name.lower()) == key), None)
     info = (
         {"name": known.name, "ats": known.ats, "slug": known.slug}
         if known
         else await resolve_input(client, text, use_browser=use_browser)
     )
-    row = db.query(Company).filter(Company.ats == info["ats"], Company.slug == info["slug"]).first()
+    row = (
+        visible.filter(Company.ats == info["ats"], Company.slug == info["slug"]).first()
+    )
     created = row is None
     if row is None:
-        row = Company(name=info["name"], ats=info["ats"], slug=info["slug"], source="user")
+        row = Company(name=info["name"], ats=info["ats"], slug=info["slug"], source="user", user_id=user_id)
         db.add(row)
+    elif row.user_id is None and user_id is not None:
+        # A regular user re-adding a global (starter) board must not mutate
+        # the shared row; only admins manage global companies.
+        return row, False
     row.enabled = 1
     try:
         jobs = await ats.fetch_board(client, Board(row.ats, row.slug, row.name), "")
