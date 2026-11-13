@@ -77,7 +77,7 @@ Hosted mode turns the app into a small multi-user service:
 
 - The home page is public and shows aggregate counts only. Everything else — starting a run, applications, profiles — requires an account.
 - Registration is **invite-only**: an admin creates invite codes in the admin UI, and a new user needs one to sign up.
-- Email verification is required before a user can start a run; password reset works by emailed link. Both use the same one-time token mechanism.
+- Email verification is required before a user can sign in (registration sends the link; sign-in stays blocked until the address is verified). Users can resend the verification link themselves from the sign-in page, rate-limited to one per minute and five per day. Password reset works by emailed link. Both use the same one-time token mechanism.
 - Each user sees only their own runs, applications, and profile. Companies from the starter list are shared; companies a user adds are theirs alone.
 - Admins can manage users and invites. Admins named in `ADMIN_EMAILS` can't be demoted, deactivated, or deleted.
 - Hosted pre-fill runs in a streamed, server-side browser session: the user watches the form being filled, can take control, and always submits it themselves — the app never submits. The session uses a fresh, temporary browser profile that is deleted when the session closes.

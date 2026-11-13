@@ -259,6 +259,29 @@ def send_email(db: Session, to_email: str, subject: str, body: str, kind: str) -
     return row
 
 
+RESEND_COOLDOWN_SECONDS = 60
+RESEND_DAILY_CAP = 5
+
+
+def verification_resend_allowed(db: Session, email: str) -> bool:
+    """Rate limit for self-serve verification-email resends, counted from
+    the email outbox: the registration email counts as the first send, then
+    at most one send per cooldown window and a small cap per day."""
+    rows = (
+        db.query(EmailOutbox)
+        .filter(EmailOutbox.to_email == email, EmailOutbox.kind == "verify")
+        .order_by(EmailOutbox.id.desc())
+        .all()
+    )
+    if not rows:
+        return True
+    now = datetime.utcnow()
+    if (now - rows[0].created_at).total_seconds() < RESEND_COOLDOWN_SECONDS:
+        return False
+    sent_today = [r for r in rows if now - r.created_at < timedelta(hours=24)]
+    return len(sent_today) < RESEND_DAILY_CAP
+
+
 def send_verification_email(db: Session, user: User) -> None:
     raw = create_action_token(db, user, "verify")
     send_email(
@@ -344,6 +367,7 @@ _PUBLIC_PATHS = {
     "/api/auth/register",
     "/api/auth/login",
     "/api/auth/verify-email",
+    "/api/auth/resend-verification",
     "/api/auth/request-password-reset",
     "/api/auth/reset-password",
 }

@@ -205,10 +205,12 @@ def register(body: RegisterBody, response: Response):
         db.commit()
         db.refresh(user)
         auth.send_verification_email(db, user)
-        raw = auth.create_session(db, user)
-        _set_session_cookie(response, raw)
         auth.claim_orphans(db, user)
-        return auth.user_payload(user)
+        # No session yet: the account must verify its email address before
+        # it can sign in (see /api/auth/login).
+        payload = auth.user_payload(user)
+        payload["verification_required"] = True
+        return payload
     finally:
         db.close()
 
@@ -231,6 +233,13 @@ def login(body: LoginBody, response: Response):
             raise HTTPException(401, "Email or password is incorrect.")
         if not user.is_active:
             raise HTTPException(403, "This account has been deactivated. Contact an admin.")
+        if not user.email_verified:
+            raise HTTPException(
+                403,
+                "Verify your email address before signing in. We sent a "
+                "verification link when you registered — if it expired, "
+                "use the resend option below to get a new one.",
+            )
         auth.clear_failed_logins(email)
         user.last_login_at = datetime.utcnow()
         db.commit()
@@ -277,6 +286,31 @@ def verify_email(body: TokenBody):
         user.email_verified = 1
         db.commit()
         return {"ok": True, "email": user.email}
+    finally:
+        db.close()
+
+
+class ResendVerificationBody(BaseModel):
+    email: str
+
+
+@app.post("/api/auth/resend-verification")
+def resend_verification(body: ResendVerificationBody):
+    # Always the same response, whether or not the account exists, is
+    # already verified, or the resend limit has been reached — the endpoint
+    # must not reveal which addresses have accounts.
+    email = (body.email or "").strip().lower()
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.email == email).first()
+        if (
+            user is not None
+            and user.is_active
+            and not user.email_verified
+            and auth.verification_resend_allowed(db, email)
+        ):
+            auth.send_verification_email(db, user)
+        return {"ok": True}
     finally:
         db.close()
 

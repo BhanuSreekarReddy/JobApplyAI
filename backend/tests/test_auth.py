@@ -6,6 +6,7 @@ seeded admin.
 """
 import re
 import uuid
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -111,8 +112,13 @@ def test_register_with_invite_cannot_reuse_it():
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["role"] == "user" and body["email_verified"] is False
-    # The registration also signed the new user in.
-    assert client.get("/api/auth/me").json()["email"] == email
+    assert body["verification_required"] is True
+    # Registration does NOT sign the new user in: the email address must be
+    # verified first, so there is no session and sign-in is refused.
+    assert client.get("/api/auth/me").status_code == 401
+    r = client.post("/api/auth/login", json={"email": email, "password": PASSWORD})
+    assert r.status_code == 403
+    assert "Verify your email" in r.json()["detail"]
 
     other = _client()
     r = other.post(
@@ -157,11 +163,13 @@ def test_email_verification_flow_and_run_gate(monkeypatch):
     r = client.post("/api/auth/register", json={"email": email, "password": PASSWORD, "invite_code": code})
     assert r.status_code == 200
 
-    # Unverified accounts cannot start a run.
+    # Unverified accounts cannot sign in, so they cannot start a run either.
+    r = client.post("/api/auth/login", json={"email": email, "password": PASSWORD})
+    assert r.status_code == 403
     with open(SAMPLE, "rb") as fh:
         r = client.post("/api/runs", files={"resume": ("resume.txt", fh, "text/plain")},
                         data={"locations": "San Francisco, CA"})
-    assert r.status_code == 403
+    assert r.status_code == 401
 
     token = _outbox_token(email, "verify")
     # The emailed link is absolute, built from the default public base URL.
@@ -175,7 +183,10 @@ def test_email_verification_flow_and_run_gate(monkeypatch):
     assert r.status_code == 200 and r.json()["already_verified"] is True
     assert client.post("/api/auth/verify-email", json={"token": "nope"}).status_code == 400
 
-    # Verified now: run creation is accepted (background execution stubbed).
+    # Verified now: sign-in works and run creation is accepted
+    # (background execution stubbed).
+    r = client.post("/api/auth/login", json={"email": email, "password": PASSWORD})
+    assert r.status_code == 200, r.text
     monkeypatch.setattr(main, "_run_in_background", lambda run_id: None)
     with open(SAMPLE, "rb") as fh:
         r = client.post("/api/runs", files={"resume": ("resume.txt", fh, "text/plain")},
@@ -189,6 +200,97 @@ def test_email_verification_flow_and_run_gate(monkeypatch):
     profile = client.get("/api/profile").json()
     assert profile["name"] == "Priya Nair"
     assert profile["contact_email"] == "priya.nair@example.com"
+
+
+def _verify_outbox_count(email: str) -> int:
+    with SessionLocal() as db:
+        return (
+            db.query(EmailOutbox)
+            .filter(EmailOutbox.to_email == email, EmailOutbox.kind == "verify")
+            .count()
+        )
+
+
+def _backdate_verify_emails(email: str, minutes: int) -> None:
+    with SessionLocal() as db:
+        rows = (
+            db.query(EmailOutbox)
+            .filter(EmailOutbox.to_email == email, EmailOutbox.kind == "verify")
+            .all()
+        )
+        for row in rows:
+            row.created_at = datetime.utcnow() - timedelta(minutes=minutes)
+        db.commit()
+
+
+def test_resend_verification_flow():
+    code = f"INV-{uuid.uuid4().hex[:10]}"
+    _add_invite(code)
+    email = _unique_email("resend")
+    client = _client()
+    r = client.post("/api/auth/register", json={"email": email, "password": PASSWORD, "invite_code": code})
+    assert r.status_code == 200
+    assert _verify_outbox_count(email) == 1  # the registration email
+
+    # Inside the cooldown the resend is a no-op (but still answers ok).
+    r = client.post("/api/auth/resend-verification", json={"email": email})
+    assert r.status_code == 200
+    assert _verify_outbox_count(email) == 1
+
+    # Past the cooldown a fresh link is sent, and it verifies the account.
+    _backdate_verify_emails(email, 5)
+    r = client.post("/api/auth/resend-verification", json={"email": email})
+    assert r.status_code == 200
+    assert _verify_outbox_count(email) == 2
+    token = _outbox_token(email, "verify")  # newest outbox row
+    r = client.post("/api/auth/verify-email", json={"token": token})
+    assert r.status_code == 200
+
+    # Already verified: resend sends nothing.
+    _backdate_verify_emails(email, 5)
+    r = client.post("/api/auth/resend-verification", json={"email": email})
+    assert r.status_code == 200
+    assert _verify_outbox_count(email) == 2
+
+    # Unknown accounts get the same response and no email (no enumeration).
+    ghost = _unique_email("ghostresend")
+    r = client.post("/api/auth/resend-verification", json={"email": ghost})
+    assert r.status_code == 200
+    assert _verify_outbox_count(ghost) == 0
+
+
+def test_resend_verification_daily_cap():
+    code = f"INV-{uuid.uuid4().hex[:10]}"
+    _add_invite(code)
+    email = _unique_email("resendcap")
+    client = _client()
+    r = client.post("/api/auth/register", json={"email": email, "password": PASSWORD, "invite_code": code})
+    assert r.status_code == 200
+    # Simulate a day of resends up to the cap: 5 verify emails in 24h.
+    with SessionLocal() as db:
+        rows = (
+            db.query(EmailOutbox)
+            .filter(EmailOutbox.to_email == email, EmailOutbox.kind == "verify")
+            .all()
+        )
+        for row in rows:
+            row.created_at = datetime.utcnow() - timedelta(hours=2)
+        for _ in range(auth.RESEND_DAILY_CAP - 1):
+            db.add(
+                EmailOutbox(
+                    to_email=email,
+                    subject="Verify your JobApply Agent account",
+                    body="",
+                    kind="verify",
+                    sent=0,
+                    created_at=datetime.utcnow() - timedelta(hours=2),
+                )
+            )
+        db.commit()
+    assert _verify_outbox_count(email) == auth.RESEND_DAILY_CAP
+    r = client.post("/api/auth/resend-verification", json={"email": email})
+    assert r.status_code == 200
+    assert _verify_outbox_count(email) == auth.RESEND_DAILY_CAP  # capped
 
 
 def test_verification_email_uses_configured_public_base_url(monkeypatch):
