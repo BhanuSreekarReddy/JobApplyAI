@@ -8,11 +8,22 @@ a WebSocket (CDP screencast) and forwards their mouse/keyboard input back
 themselves — nothing is ever submitted by the agent.
 
 Clipboard: a screencast shares no clipboard with the user's machine, so
-paste arrives as an explicit "insert-text" message (CDP Input.insertText
-at the page's focus) and copy is an explicit "copy-selection" message
-(the page's current selection is read back for the client to place on the
-user's real clipboard). There is no access to the server browser's own
-clipboard or to unselected page content.
+copy/paste is bridged at the keyboard level. On a "paste" message the
+server grants clipboard permission for the page's origin (CDP
+Browser.grantPermissions), writes the text onto the SESSION browser's
+clipboard (navigator.clipboard.writeText), then dispatches a genuine
+Ctrl+V (CDP Input.dispatchKeyEvent) — the page sees a real paste event
+and its own paste handlers run, exactly as if the user had pasted
+locally. On a "copy" message the server dispatches a genuine Ctrl+C,
+reads the session clipboard back (navigator.clipboard.readText), and
+returns the text for the client to place on the user's real clipboard.
+Copy/paste WITHIN the session (field to field, page to page) never
+leaves the session browser and is fully native, rich text included.
+Only plain text crosses the local<->session boundary. Each native route
+has a fallback: paste degrades to CDP Input.insertText at the page's
+focus ("insert-text"), and copy degrades to reading the page's current
+selection ("copy-selection"). The older message names are kept for the
+fallback UI and older clients.
 
 Hard rules:
 - The browser profile lives under data/prefill-sessions/<id>/ and is
@@ -459,44 +470,247 @@ _KEY_VK = {
 }
 
 
+# Keyboard-native clipboard bridging. Tests flip this to False to prove
+# the fallbacks still work when the native route is unavailable.
+NATIVE_CLIPBOARD = True
+
+# CDP Browser.grantPermissions permission names for clipboard access. The
+# sanitized-write variant restricts writes to sanitized formats (plain
+# text is unaffected); Chromium builds that do not know it reject the
+# whole grant, so the write-only name is retried on its own.
+_CLIPBOARD_PERMISSIONS = ("clipboardReadWrite", "clipboardSanitizedWrite")
+_CTRL_MODIFIER = 2  # CDP Input modifier bitmask bit for Control
+
+
+def _page_origin(live: _Live) -> str | None:
+    if live.page is None:
+        return None
+    try:
+        from urllib.parse import urlsplit
+
+        parts = urlsplit(live.page.url or "")
+        if parts.scheme in {"http", "https"} and parts.netloc:
+            return f"{parts.scheme}://{parts.netloc}"
+    except Exception:
+        pass
+    return None
+
+
+async def _grant_clipboard(live: _Live) -> bool:
+    """Grant the session page's origin access to the session browser's
+    clipboard. CDP first; Playwright's context-level grant (which drives
+    the same CDP command at browser level) as a fallback."""
+    origin = _page_origin(live)
+    if origin is None:
+        return False
+    if live.cdp is not None:
+        for permissions in (_CLIPBOARD_PERMISSIONS, ("clipboardReadWrite",)):
+            try:
+                await live.cdp.send(
+                    "Browser.grantPermissions",
+                    {"origin": origin, "permissions": list(permissions)},
+                )
+                return True
+            except Exception:
+                continue
+    if live.context is not None:
+        try:
+            await live.context.grant_permissions(
+                ["clipboard-read", "clipboard-write"], origin=origin
+            )
+            return True
+        except Exception:
+            pass
+    return False
+
+
+async def _clipboard_write(live: _Live, text: str) -> bool:
+    """Set the session browser's clipboard from the page context. The
+    main frame is tried first (it owns the granted origin); other frames
+    follow in case focus/permission sits with one of them."""
+    if live.page is None:
+        return False
+    frames = [live.page.main_frame] + [f for f in live.page.frames if f is not live.page.main_frame]
+    for frame in frames:
+        try:
+            await frame.evaluate(
+                "async (t) => { await navigator.clipboard.writeText(t); }", text
+            )
+            return True
+        except Exception:
+            continue
+    return False
+
+
+async def _clipboard_read(live: _Live) -> str | None:
+    """Read the session browser's clipboard text, or None when the
+    clipboard API is unreachable (denied permission, unfocused document,
+    non-secure context)."""
+    if live.page is None:
+        return None
+    frames = [live.page.main_frame] + [f for f in live.page.frames if f is not live.page.main_frame]
+    for frame in frames:
+        try:
+            value = await frame.evaluate("async () => await navigator.clipboard.readText()")
+        except Exception:
+            continue
+        if isinstance(value, str):
+            return value
+    return None
+
+
+async def _dispatch_ctrl_key(live: _Live, key: str, code: str, vk: int) -> None:
+    """A genuine Ctrl+<key> keystroke in the session page: the browser's
+    own editing command runs (paste/copy), including the page's event
+    handlers — unlike Input.insertText, which edits directly."""
+    if live.cdp is None:
+        raise RuntimeError("no CDP session")
+    params = {
+        "key": key,
+        "code": code,
+        "windowsVirtualKeyCode": vk,
+        "nativeVirtualKeyCode": vk,
+        "modifiers": _CTRL_MODIFIER,
+    }
+    await live.cdp.send("Input.dispatchKeyEvent", {"type": "keyDown", **params})
+    await live.cdp.send("Input.dispatchKeyEvent", {"type": "keyUp", **params})
+
+
+# The current selection, in whichever form the page holds it: text in a
+# form control lives in the control's own selection range (Chrome does
+# not expose it through window.getSelection), other text in the document
+# selection. Password fields are excluded — browsers refuse to copy from
+# them natively, and the bridge must not do it either.
+_SELECTION_JS = """() => {
+  const ae = document.activeElement;
+  if (ae && typeof ae.selectionStart === 'number' && typeof ae.value === 'string'
+      && (ae.tagName === 'TEXTAREA' || (ae.tagName === 'INPUT' && ae.type !== 'password'))) {
+    return ae.value.substring(ae.selectionStart, ae.selectionEnd);
+  }
+  return window.getSelection ? window.getSelection().toString() : '';
+}"""
+
+
+async def _selection_text(live: _Live) -> str:
+    """The text currently selected in the streamed page ('' if none).
+    This is all the fallback copy route can reach: no selection, no
+    copy; arbitrary page content is never read."""
+    if live.page is None:
+        return ""
+    for frame in live.page.frames:
+        if formfill.CAPTCHA_RE.search(frame.url or ""):
+            continue
+        try:
+            value = await frame.evaluate(_SELECTION_JS)
+        except Exception:
+            continue
+        if value and str(value).strip():
+            return str(value)
+    return ""
+
+
+async def _native_paste(live: _Live, text: str) -> bool:
+    """Put `text` on the session browser's clipboard and dispatch a real
+    Ctrl+V. False when any step is unavailable — the caller degrades to
+    Input.insertText."""
+    try:
+        if live.cdp is None or live.page is None:
+            return False
+        if not await _grant_clipboard(live):
+            return False
+        if not await _clipboard_write(live, text):
+            return False
+        await _dispatch_ctrl_key(live, "v", "KeyV", 86)
+        return True
+    except Exception:
+        return False
+
+
+async def _native_copy(live: _Live) -> str | None:
+    """Dispatch a real Ctrl+C and read the session clipboard back.
+    Returns the copied text ('' when nothing is selected, matching the
+    fallback's answer), or None when the native route is unavailable and
+    the caller should fall back to reading the selection."""
+    try:
+        if live.cdp is None or live.page is None:
+            return None
+        selection = await _selection_text(live)
+        if not selection:
+            return ""
+        if not await _grant_clipboard(live):
+            return None
+        before = await _clipboard_read(live)
+        await _dispatch_ctrl_key(live, "c", "KeyC", 67)
+        # The clipboard write lands asynchronously after the keystroke.
+        # Poll briefly, and distrust a value that never changed: if the
+        # copy did not take effect, the clipboard still holds whatever
+        # was there before, which is NOT what the user just selected.
+        after: str | None = None
+        for _ in range(8):
+            await asyncio.sleep(0.1)
+            after = await _clipboard_read(live)
+            if after is not None and (after == selection or after != before):
+                break
+        if after is None:
+            return None
+        if after == before and after != selection:
+            return None
+        return after
+    except Exception:
+        return None
+
+
 async def _dispatch_input(live: _Live, message: dict[str, Any]) -> dict[str, Any] | None:
     """Forward one client input message to the streamed page. Returns an
-    optional reply for the client (currently only clipboard text)."""
+    optional reply for the client (clipboard text, paste outcome)."""
     cdp = live.cdp
     if cdp is None:
         return None
     kind = message.get("type")
     live.last_activity = datetime.utcnow()
     try:
-        if kind == "insert-text":
-            # Paste-in: the screencast has no shared clipboard with the
-            # user's machine, so the client sends the text itself and CDP
-            # inserts it at the page's current focus/caret in one edit —
-            # the same end result as pasting into the focused field.
+        if kind == "paste":
+            # Native paste: the client sends the user's clipboard text
+            # (captured from the browser's paste event); the server puts
+            # it on the session browser's clipboard and dispatches a
+            # genuine Ctrl+V, so the page pastes exactly as it would for
+            # a local user. Degrades to insertText when the clipboard
+            # route is unavailable.
+            text = (message.get("text") or "")[:10_000]
+            via = "insert-text"
+            if text:
+                if NATIVE_CLIPBOARD and await _native_paste(live, text):
+                    via = "native"
+                else:
+                    await cdp.send("Input.insertText", {"text": text})
+            return {"type": "paste-result", "via": via}
+        elif kind == "copy":
+            # Native copy: a genuine Ctrl+C in the session page, with
+            # the session clipboard read back for the client to place on
+            # the user's real clipboard. Degrades to reading the page's
+            # current selection.
+            copied: str | None = None
+            via = "selection"
+            if NATIVE_CLIPBOARD:
+                copied = await _native_copy(live)
+                if copied is not None:
+                    via = "native"
+            if copied is None:
+                copied = await _selection_text(live)
+            return {"type": "clipboard", "text": copied, "via": via}
+        elif kind == "insert-text":
+            # Fallback paste (older clients, and the fallback paste box):
+            # the text is inserted at the page's current focus/caret in
+            # one edit. No paste event fires and the session clipboard is
+            # untouched — which is exactly why it is only the fallback.
             text = message.get("text") or ""
             if text:
                 await cdp.send("Input.insertText", {"text": text[:10_000]})
         elif kind == "copy-selection":
-            # Copy-out: there is no clipboard channel in a screencast, but
-            # the text the user selected in the streamed page can be read
-            # back and handed to the client, which puts it on the user's
-            # real clipboard. Only the current selection is reachable —
-            # arbitrary page content is not.
-            selected = ""
-            if live.page is not None:
-                for frame in live.page.frames:
-                    if formfill.CAPTCHA_RE.search(frame.url or ""):
-                        continue
-                    try:
-                        value = await frame.evaluate(
-                            "() => (window.getSelection ? window.getSelection().toString() : '')"
-                        )
-                    except Exception:
-                        continue
-                    if value and str(value).strip():
-                        selected = str(value)
-                        break
-            return {"type": "clipboard", "text": selected}
+            # Fallback copy (older clients): read the page's current
+            # selection back for the client to place on the user's real
+            # clipboard. Only the selection is reachable.
+            return {"type": "clipboard", "text": await _selection_text(live)}
         elif kind == "mouse":
             action = message.get("action")
             event_type = {"press": "mousePressed", "release": "mouseReleased", "move": "mouseMoved"}.get(action)

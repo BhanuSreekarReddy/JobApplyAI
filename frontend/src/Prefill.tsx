@@ -19,12 +19,19 @@ type SessionInfo = {
  * and nothing is submitted by the agent — the user clicks Submit in the
  * streamed page themselves.
  *
- * Copy/paste: a screencast shares no clipboard with this machine, so paste
- * travels as text (the client sends it; the server inserts it at the
- * form's focus) and copy reads the streamed page's current selection back
- * onto this machine's clipboard. Only the selection is reachable — there
- * is no channel to arbitrary page content or the server browser's own
- * clipboard.
+ * Copy/paste: keyboard-native, the way a local page behaves. Ctrl/Cmd+V
+ * is captured from the browser's own paste event (the focused canvas is
+ * the sink, so the clipboard text is available synchronously — no
+ * permission prompt, no paste box) and forwarded to the server, which
+ * puts it on the streamed browser's clipboard and dispatches a genuine
+ * Ctrl+V there: the page sees a real paste event. Ctrl/Cmd+C asks the
+ * server to dispatch a genuine Ctrl+C in the streamed page and read its
+ * clipboard back; the returned text is written to this machine's
+ * clipboard. Copy/paste inside the streamed page never leaves its
+ * browser and is fully native. Only plain text crosses between the two
+ * machines. If a browser won't play along, the server degrades paste to
+ * direct text insertion and copy to reading the selection — automatically;
+ * there are no clipboard controls in the UI by design.
  */
 export default function PrefillView({
   sessionId,
@@ -46,8 +53,6 @@ export default function PrefillView({
   const [pendingClose, setPendingClose] = useState(false);
   const [answersBusy, setAnswersBusy] = useState(false);
   const [answersNote, setAnswersNote] = useState("");
-  const [pasteText, setPasteText] = useState("");
-  const [copiedText, setCopiedText] = useState("");
   const [clipNote, setClipNote] = useState("");
 
   useEffect(() => {
@@ -67,10 +72,18 @@ export default function PrefillView({
     ws.onmessage = (msg) => {
       if (typeof msg.data === "string") {
         // Text messages are control replies (clipboard text read back from
-        // the streamed page); binary messages are screencast frames.
+        // the streamed page, paste outcomes); binary messages are
+        // screencast frames.
         try {
-          const data = JSON.parse(msg.data) as { type?: string; text?: string };
+          const data = JSON.parse(msg.data) as { type?: string; text?: string; via?: string };
           if (data.type === "clipboard") void receiveCopiedText(data.text || "");
+          if (data.type === "paste-result") {
+            setClipNote(
+              data.via === "native"
+                ? "Pasted into the form."
+                : "Pasted into the form (basic mode — the native paste route wasn't available).",
+            );
+          }
         } catch {
           /* not a control message */
         }
@@ -169,10 +182,12 @@ export default function PrefillView({
     }
   }
 
-  // Copy-out: the server reads the streamed page's current selection and
-  // sends it back; put it on this machine's clipboard. If the browser
-  // refuses the programmatic write (no fresh user gesture), show the text
-  // in a box the user can copy with a real keystroke instead.
+  // Copy-out: the server dispatches a real Ctrl+C in the streamed page
+  // and sends its clipboard back; put the text on this machine's
+  // clipboard. Try the async clipboard API first, then a temporary
+  // textarea + execCommand('copy') (still within reach of the copy
+  // keystroke's user gesture). If the browser blocks both, the status
+  // note says so — there is deliberately no manual-copy UI.
   async function receiveCopiedText(text: string) {
     if (!text) {
       setClipNote("Nothing is selected in the form — select text there first, then copy.");
@@ -180,25 +195,33 @@ export default function PrefillView({
     }
     try {
       await navigator.clipboard.writeText(text);
-      setCopiedText("");
       setClipNote("Copied from the form to your clipboard.");
+      return;
     } catch {
-      setCopiedText(text);
-      setClipNote("Your browser blocked automatic copying — the text is in the box below, copy it from there.");
+      /* fall through to the execCommand route */
     }
+    try {
+      const area = document.createElement("textarea");
+      area.value = text;
+      area.style.position = "fixed";
+      area.style.opacity = "0";
+      document.body.appendChild(area);
+      area.select();
+      const ok = document.execCommand("copy");
+      area.remove();
+      if (ok) {
+        setClipNote("Copied from the form to your clipboard.");
+        return;
+      }
+    } catch {
+      /* fall through to the status note */
+    }
+    setClipNote("Your browser blocked automatic copying, so the selected text couldn't be copied.");
   }
 
-  function requestCopySelection() {
+  function requestCopy() {
     setClipNote("");
-    send({ type: "copy-selection" });
-  }
-
-  // Paste-in: the screencast shares no clipboard with this machine, so the
-  // text is sent to the server, which inserts it at the form's focus.
-  function pasteIntoForm(text: string) {
-    if (!text) return;
-    send({ type: "insert-text", text });
-    setClipNote("Pasted into the form at the cursor.");
+    send({ type: "copy" });
   }
 
   async function fetchCandidates(): Promise<AnswerCandidate[] | null> {
@@ -348,18 +371,23 @@ export default function PrefillView({
         onKeyDown={(e) => {
           const mod = e.ctrlKey || e.metaKey;
           if (mod && e.key.toLowerCase() === "v") {
-            // Paste: the browser fires a paste event carrying this
-            // machine's clipboard text; onPaste forwards it for insertion
-            // into the streamed page. Forwarding the bare Ctrl+V keystroke
-            // instead would paste the SERVER browser's (empty) clipboard.
-            e.preventDefault();
+            // Paste: do NOT preventDefault and do NOT forward the
+            // keystroke. The browser must be allowed to fire its native
+            // paste event on this focused canvas — preventDefault here
+            // would suppress it — and onPaste forwards the clipboard
+            // text to the server, which performs a genuine paste inside
+            // the streamed page. Forwarding the bare keystroke would
+            // race that with the session browser's own clipboard.
             return;
           }
           if (mod && e.key.toLowerCase() === "c") {
-            // Mirror the selection to this machine's clipboard. The
-            // keystroke itself is still forwarded below, so copy/paste
-            // within the streamed page keeps working too.
-            requestCopySelection();
+            // Copy: swallow the keystroke locally and ask the server to
+            // copy natively (it dispatches its own Ctrl+C in the
+            // streamed page, so the page's clipboard updates there too
+            // and copy/paste within the page keeps working).
+            e.preventDefault();
+            requestCopy();
+            return;
           }
           // Full keystrokes, not bare characters: the streamed page's own
           // keydown handlers (segmented one-time-code boxes especially) need
@@ -379,8 +407,11 @@ export default function PrefillView({
           e.preventDefault();
         }}
         onKeyUp={(e) => {
-          if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "v") {
-            e.preventDefault();
+          const modUp = e.ctrlKey || e.metaKey;
+          if (modUp && (e.key.toLowerCase() === "v" || e.key.toLowerCase() === "c")) {
+            // The matching keydown was handled locally (paste event /
+            // native copy request); the streamed page never saw it, so
+            // don't send it a stray key release either.
             return;
           }
           send({
@@ -394,51 +425,25 @@ export default function PrefillView({
           });
         }}
         onPaste={(e) => {
+          // The browser's native paste event: this machine's clipboard
+          // text, available synchronously because the canvas is focused.
+          // The server turns it into a genuine paste in the streamed
+          // page (its clipboard + a real Ctrl+V), falling back to plain
+          // insertion only if that route is unavailable there.
           const text = e.clipboardData.getData("text");
           if (text) {
             e.preventDefault();
-            pasteIntoForm(text);
+            setClipNote("");
+            send({ type: "paste", text });
           }
         }}
       />
       <p className="hint">
         Click the form to focus it, then type and click as usual — including the site's own
-        Submit button when you are ready. Copy and paste work too: Ctrl+C copies the text you
-        selected in the form to your own clipboard, and Ctrl+V pastes your clipboard into the
-        focused field. If a paste doesn't land, use the box below.
+        Submit button when you are ready. Copy and paste work with your usual shortcuts:
+        Ctrl+C / Cmd+C copies the text you selected in the form to your own clipboard, and
+        Ctrl+V / Cmd+V pastes your clipboard into the focused field — no buttons needed.
       </p>
-      <div className="row" style={{ marginBottom: 12 }}>
-        <input
-          type="text"
-          placeholder="Text to paste into the form…"
-          value={pasteText}
-          onChange={(e) => setPasteText(e.target.value)}
-          style={{ flex: 1 }}
-        />
-        <button
-          className="ghost"
-          disabled={streamState !== "live" || !pasteText}
-          onClick={() => {
-            pasteIntoForm(pasteText);
-            setPasteText("");
-          }}
-        >
-          Paste into form
-        </button>
-        <button className="ghost" disabled={streamState !== "live"} onClick={requestCopySelection}>
-          Copy selected text
-        </button>
-      </div>
-      {copiedText ? (
-        <input
-          type="text"
-          readOnly
-          value={copiedText}
-          onFocus={(e) => e.target.select()}
-          style={{ width: "100%", marginBottom: 12 }}
-          aria-label="Text copied from the form"
-        />
-      ) : null}
       {clipNote ? <p className="meta">{clipNote}</p> : null}
       {candidates ? (
         <>
