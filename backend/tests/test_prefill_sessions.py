@@ -405,3 +405,176 @@ def test_session_leaves_a_radio_group_without_a_saved_answer(radio_form_server):
         assert RADIO_QUESTION not in session["filled"]
         assert RADIO_QUESTION in session["needs_attention"], session["needs_attention"]
         assert client.post(f"/api/prefill-sessions/{session['id']}/close").status_code == 200
+
+
+CLIP_FORM_HTML = """<!doctype html>
+<html><body style="margin:0">
+<form>
+  <div><label>First entry <input id="first" type="text" name="first_entry" style="width:600px;height:70px"></label></div>
+  <div style="margin-top:10px"><label>Second entry <input id="second" type="text" name="second_entry" style="width:600px;height:70px"></label></div>
+</form>
+<script>
+  window.__pastes = [];
+  document.addEventListener('paste', (e) => {
+    window.__pastes.push({
+      text: e.clipboardData ? e.clipboardData.getData('text') : null,
+      target: e.target && e.target.id ? e.target.id : '',
+      trusted: e.isTrusted,
+    });
+  });
+</script>
+</body></html>"""
+
+
+@pytest.fixture(scope="module")
+def clip_form_server():
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = CLIP_FORM_HTML.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_address[1]}/apply"
+    server.shutdown()
+
+
+async def _eval_on_page(page, expression):
+    return await page.evaluate(expression)
+
+
+def _page_eval(client: TestClient, session_id: str, expression: str):
+    """Evaluate JS on the live session page. The page belongs to the
+    app's event loop, so — like the screenshot helper — the call goes
+    through the client's blocking portal."""
+    live = prefill_sessions._live[session_id]
+    return client.portal.call(_eval_on_page, live.page, expression)
+
+
+def _await_reply(ws, want_type: str, timeout: float = 20.0) -> dict:
+    """Read stream messages (screencast frames included) until the JSON
+    control reply of the wanted type arrives."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        message = ws.receive()
+        text = message.get("text")
+        if not text:
+            continue  # a binary screencast frame
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict) and data.get("type") == want_type:
+            return data
+    raise AssertionError(f"no {want_type!r} reply within {timeout}s")
+
+
+def _click_field(ws, x: int, y: int) -> None:
+    ws.send_json({"type": "mouse", "action": "press", "x": x, "y": y, "button": "left"})
+    ws.send_json({"type": "mouse", "action": "release", "x": x, "y": y, "button": "left"})
+
+
+def test_native_paste_fires_a_real_paste_event(clip_form_server):
+    """The keyboard-native paste: the client forwards clipboard text, the
+    server puts it on the session browser's clipboard and dispatches a
+    genuine Ctrl+V. Proof this is not the old insert-text path: the page
+    observes a trusted paste event carrying the text (insertText edits
+    the field silently and fires no paste event at all)."""
+    email = _unique_email("pfpaste")
+    user_id = _make_user(email)
+    app_id = _make_application(user_id, clip_form_server)
+    with _logged_in(email) as client:
+        session = _create_session(client, app_id)
+        with client.websocket_connect(f"/api/prefill-sessions/{session['id']}/stream") as ws:
+            ws.receive_bytes()  # first frame: stream is live
+            _click_field(ws, 200, 35)
+            assert _page_eval(client, session["id"], "() => document.activeElement.id") == "first"
+            ws.send_json({"type": "paste", "text": "native paste text"})
+            reply = _await_reply(ws, "paste-result")
+            assert reply["via"] == "native", reply
+            value = _page_eval(client, session["id"], "() => document.getElementById('first').value")
+            assert value == "native paste text", value
+            pastes = _page_eval(client, session["id"], "() => window.__pastes")
+            assert pastes == [
+                {"text": "native paste text", "target": "first", "trusted": True}
+            ], pastes
+        assert client.post(f"/api/prefill-sessions/{session['id']}/close").status_code == 200
+
+
+def test_native_copy_then_paste_round_trip(clip_form_server):
+    """Select text in the session page, copy with the native flow (real
+    Ctrl+C + session clipboard read-back), then paste the returned text
+    into a second field through the native paste — the full round trip
+    the viewer's Ctrl+C / Ctrl+V now performs."""
+    email = _unique_email("pfroundtrip")
+    user_id = _make_user(email)
+    app_id = _make_application(user_id, clip_form_server)
+    with _logged_in(email) as client:
+        session = _create_session(client, app_id)
+        with client.websocket_connect(f"/api/prefill-sessions/{session['id']}/stream") as ws:
+            ws.receive_bytes()
+            _click_field(ws, 200, 35)
+            ws.send_json({"type": "paste", "text": "round trip text"})
+            assert _await_reply(ws, "paste-result")["via"] == "native"
+            selected = _page_eval(
+                client,
+                session["id"],
+                "() => { const el = document.getElementById('first');"
+                " el.setSelectionRange(0, el.value.length);"
+                " return el.value.substring(el.selectionStart, el.selectionEnd); }",
+            )
+            assert selected == "round trip text", selected
+            ws.send_json({"type": "copy"})
+            reply = _await_reply(ws, "clipboard")
+            assert reply["via"] == "native", reply
+            assert reply["text"] == "round trip text", reply
+            _click_field(ws, 200, 115)
+            assert _page_eval(client, session["id"], "() => document.activeElement.id") == "second"
+            ws.send_json({"type": "paste", "text": reply["text"]})
+            assert _await_reply(ws, "paste-result")["via"] == "native"
+            value = _page_eval(client, session["id"], "() => document.getElementById('second').value")
+            assert value == "round trip text", value
+        assert client.post(f"/api/prefill-sessions/{session['id']}/close").status_code == 200
+
+
+def test_clipboard_falls_back_when_native_route_is_unavailable(clip_form_server, monkeypatch):
+    """With the native clipboard route disabled (as when the browser
+    denies clipboard permission/API access), paste still lands — via
+    insertText, which fires NO paste event — and copy still returns the
+    selected text, read from the page's selection."""
+    monkeypatch.setattr(prefill_sessions, "NATIVE_CLIPBOARD", False)
+    email = _unique_email("pffallback")
+    user_id = _make_user(email)
+    app_id = _make_application(user_id, clip_form_server)
+    with _logged_in(email) as client:
+        session = _create_session(client, app_id)
+        with client.websocket_connect(f"/api/prefill-sessions/{session['id']}/stream") as ws:
+            ws.receive_bytes()
+            _click_field(ws, 200, 35)
+            ws.send_json({"type": "paste", "text": "fallback paste text"})
+            reply = _await_reply(ws, "paste-result")
+            assert reply["via"] == "insert-text", reply
+            value = _page_eval(client, session["id"], "() => document.getElementById('first').value")
+            assert value == "fallback paste text", value
+            # insertText edits directly: no paste event may have fired.
+            pastes = _page_eval(client, session["id"], "() => window.__pastes")
+            assert pastes == [], pastes
+            _page_eval(
+                client,
+                session["id"],
+                "() => { const el = document.getElementById('first');"
+                " el.setSelectionRange(0, el.value.length); }",
+            )
+            ws.send_json({"type": "copy"})
+            reply = _await_reply(ws, "clipboard")
+            assert reply["via"] == "selection", reply
+            assert reply["text"] == "fallback paste text", reply
+        assert client.post(f"/api/prefill-sessions/{session['id']}/close").status_code == 200
