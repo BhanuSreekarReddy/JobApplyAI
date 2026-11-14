@@ -63,6 +63,8 @@ A search run takes minutes, and today it presents as an opaque queued state unti
 
 The proposals above, drawn. Each screen gives today's state in one line, the proposed layout, and what changes. The wireframes are schematic — layout and hierarchy, not visual design. Each is paired with a rendered mockup of the same screen (sample data throughout).
 
+**Design continuity:** this redesign changes layout and hierarchy only. It deliberately keeps the app's existing visual scheme — the same colors, typography, and component styling the app ships with today — and introduces no new design system. The mockups are drawn in that scheme on purpose: the current dark theme and lime accent, Fraunces headings with the Figtree body font and IBM Plex Mono scores, the existing pill tabs and buttons, 20px cards and 16px job cards, and the uppercase status pills. If a mockup below looks like the app you already use with a different arrangement of the same pieces, that is the intent.
+
 ### Home — the "Needs you" inbox (Proposal 2)
 
 Today: the app opens on the Run form — the search inputs, not the user's pending decisions.
