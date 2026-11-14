@@ -59,6 +59,149 @@ How much of an application gets filled automatically is decided by the saved ans
 
 A search run takes minutes, and today it presents as an opaque queued state until results land. Show live progress while it executes: sources being searched, jobs found so far, scoring under way. The run view already reports results in stages internally; this surfaces that progress instead of a spinner, which matters more as runs get longer.
 
+## The screens
+
+The proposals above, drawn. Each screen gives today's state in one line, the proposed layout, and what changes. The wireframes are schematic — layout and hierarchy, not visual design.
+
+### Home — the "Needs you" inbox (Proposal 2)
+
+Today: the app opens on the Run form — the search inputs, not the user's pending decisions.
+
+```
++------------------------------------------------------------------+
+|  JobApplyAI                              [ Find new jobs ]       |
++------------------------------------------------------------------+
+|  NEEDS YOU                                                       |
+|                                                                  |
+|  To review (6)  ·  Forms to submit (2)  ·  Follow-ups due (1)    |
+|                                                                  |
+|  -- Run in progress -------------------------------------------  |
+|  Searching LinkedIn, Indeed...  found 14 so far, scoring...      |
+|                                                                  |
+|  TO REVIEW                                                       |
+|  Staff SWE — Acme · 92 match                     [ Review ]      |
+|  Platform Engineer — Globex · 88 match           [ Review ]      |
+|                                                                  |
+|  FORMS WAITING FOR YOUR SUBMIT                                   |
+|  Data Engineer — Initech · filled, not sent      [ Open form ]   |
+|                                                                  |
+|  FOLLOW-UPS DUE                                                  |
+|  SWE — Umbrella · applied 8 days ago             [ Follow up ]   |
++------------------------------------------------------------------+
+```
+
+What changes:
+
+- The landing view is the three queues, with counts: to review, forms waiting for the user's submit, follow-ups due.
+- "Find new jobs" is a button in the header, not the page.
+- A run in progress appears as a slim strip on this view (Proposal 7), not a separate screen to sit on.
+
+### Jobs — one list, stage filters (Proposal 1)
+
+Today: results, the review queue, and the tracker are three lists across two tabs, and a job's card changes shape as it moves between them.
+
+```
++------------------------------------------------------------------+
+|  JOBS                                                            |
+|                                                                  |
+|  [All 41] [Needs review 6] [Ready 3] [Applied 12] [Reply 2]      |
+|  [Screen 1] [Interview 1] [Offer 0] [Closed 16]                  |
+|                                                                  |
+|  Sort: [ Match score v ]           [ ] Select for bulk actions   |
+|                                                                  |
+|  (one card list — every stage, the card below throughout)        |
+|                                                                  |
+|  [ card ]                                                        |
+|  [ card ]                                                        |
+|  [ card ]                                                        |
++------------------------------------------------------------------+
+```
+
+What changes:
+
+- One card list for every stage; the stage filters with counts replace the Run/Tracker tab split.
+- Sorting and bulk selection live on the list, above the cards (Proposal 3).
+
+### The job card (Proposals 3 and 4)
+
+Today: the card leads with the cover letter and a flat row of equally weighted buttons.
+
+```
++------------------------------------------------------------------+
+|  Staff Software Engineer — Acme               [ 92 match ]       |
+|  Stage: Needs review                                             |
+|                                                                  |
+|  Why it matched: Go, Kubernetes, event-driven systems            |
+|  Missing: Kafka (listed as required)                             |
+|  $240k-$310k · Remote (US) · Posted 3 days ago                   |
+|                                                                  |
+|  Cover letter: "Dear Acme team, my work on..."       [ Expand ]  |
+|                                                                  |
+|  [          APPROVE          ]   Save letter · Skip · More...    |
++------------------------------------------------------------------+
+```
+
+What changes:
+
+- Decision facts first: match score, why it matched, what's missing, salary / location / posting age.
+- The cover letter is a one-line preview with an expand affordance.
+- One primary button — the stage's next action; everything else drops to a quiet secondary row. The stage is a pill on the card, not implied by which tab the user is standing in.
+
+### Find jobs — a panel, not the home page (Proposals 2, 5, and 7)
+
+Today: the run form is the home page (the Run tab), and a running search shows an opaque queued state until results land.
+
+```
++------------------------------------------------------------------+
+|  FIND NEW JOBS                                                   |
+|                                                                  |
+|  Roles:  [ Staff Software Engineer              ]                |
+|  Where:  [ Remote (US)                          ]                |
+|  Watchlist: Acme, Globex, Initech (+3)          [ Edit ]         |
+|                                                                  |
+|  [ Search ]                                                      |
+|                                                                  |
+|  Progress                                                        |
+|  [x] Searching sources (LinkedIn, Indeed, company pages)         |
+|  [x] Found 23 postings                                           |
+|  [>] Scoring against your profile...                             |
+|  [ ] Ready for review — lands in Needs you / Jobs                 |
++------------------------------------------------------------------+
+```
+
+What changes:
+
+- Search is a panel reached from "Find new jobs"; the Companies watchlist is a field in it, not a peer tab.
+- Progress is a visible checklist — searching, found, scoring, ready — instead of a spinner.
+- Results land in Needs you / Jobs, not on this panel.
+
+### Profile — answers coverage (Proposal 6)
+
+Today: Profile is a form of fields; answer-bank gaps surface only later, per application, as "Needs you" items on that application's form.
+
+```
++------------------------------------------------------------------+
+|  PROFILE                                                         |
+|                                                                  |
+|  Your saved answers                                              |
+|  [#####################-----------]  ~85% of a typical            |
+|                                      application                 |
+|                                                                  |
+|  Answer once, stop being asked per form:                         |
+|  · Veteran status                          [ Answer ]            |
+|  · Sponsorship needed                      [ Answer ]            |
+|  · Salary expectations                     [ Answer ]            |
+|                                                                  |
+|  Name, links, resume, experience... (existing fields below)      |
++------------------------------------------------------------------+
+```
+
+What changes:
+
+- A coverage meter at the top of Profile, computed from the questions the bank is actually asked across applications.
+- The top gaps are listed as one-time setup items, each with an Answer action.
+- The existing profile fields sit below, unchanged.
+
 ## Suggested phasing
 
 1. **Phase 1 — copy and hierarchy (cheap):** Proposal 5 (renames) and Proposal 4 (one primary action per stage). Layout and wording only.
