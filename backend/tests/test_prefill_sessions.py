@@ -9,6 +9,7 @@ serves every request (and the WebSocket) from one event loop, which is
 also how the real server runs — Playwright objects are bound to the loop
 that created them.
 """
+import asyncio
 import contextlib
 import json
 import threading
@@ -21,6 +22,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import auth, main, prefill_sessions
+from app.agent import formfill
 from app.db import SessionLocal
 from app.models import Application, PrefillSessionRecord, ProfileAnswer, Run, SeenJob, User
 
@@ -407,6 +409,7 @@ def test_session_leaves_a_radio_group_without_a_saved_answer(radio_form_server):
         assert client.post(f"/api/prefill-sessions/{session['id']}/close").status_code == 200
 
 
+
 CLIP_FORM_HTML = """<!doctype html>
 <html><body style="margin:0">
 <form>
@@ -431,6 +434,7 @@ def clip_form_server():
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
             body = CLIP_FORM_HTML.encode()
+
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.send_header("Content-Length", str(len(body)))
@@ -445,6 +449,96 @@ def clip_form_server():
     thread.start()
     yield f"http://127.0.0.1:{server.server_address[1]}/apply"
     server.shutdown()
+
+
+
+# A react-select / Greenhouse-style custom dropdown: a role=combobox search
+# input inside a [class*=control] container; the chosen value is rendered
+# next to the (cleared) input, never as the input's own value. Typing into
+# the search box only filters the menu — leaving the field without a click
+# reverts it to the "Select..." placeholder.
+DROPDOWN_FORM_HTML = """<!doctype html>
+<html><body>
+<h1>Apply — Example Co</h1>
+<form action="/submit" method="post">
+  <div><label>Full name <input type="text" name="full_name"></label></div>
+  <div><label>Email <input type="email" name="email"></label></div>
+  <div><label>Phone <input type="tel" name="phone"></label></div>
+  <div class="question">
+    <span class="question-label" id="gender-label">How do you identify? (gender identity)</span>
+    <div class="select">
+      <div class="select__control control">
+        <div class="select__value-container">
+          <div class="select__placeholder">Select...</div>
+          <div class="select__input-container"><input type="text" role="combobox" aria-autocomplete="list" aria-controls="gender-listbox" aria-labelledby="gender-label" required></div>
+        </div>
+      </div>
+      <div class="select__menu" hidden>
+        <div role="listbox" id="gender-listbox">
+          <div role="option" class="select__option">Female</div>
+          <div role="option" class="select__option">Male</div>
+          <div role="option" class="select__option">Non-binary</div>
+          <div role="option" class="select__option">Prefer not to say</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <button type="submit">Submit Application</button>
+</form>
+<script>
+  const combo = document.querySelector('input[role="combobox"]');
+  const menu = document.querySelector('.select__menu');
+  const shown = document.querySelector('.select__placeholder');
+  const opts = Array.from(document.querySelectorAll('[role="option"]'));
+  let chosen = '';
+  function render() {
+    shown.textContent = chosen || 'Select...';
+    const q = combo.value.trim().toLowerCase();
+    opts.forEach((o) => {
+      o.style.display = (!q || o.textContent.trim().toLowerCase().includes(q)) ? '' : 'none';
+    });
+  }
+  combo.addEventListener('focus', () => { menu.hidden = false; render(); });
+  combo.addEventListener('input', () => { menu.hidden = false; render(); });
+  opts.forEach((o) => o.addEventListener('click', () => {
+    chosen = o.textContent.trim();
+    combo.value = '';
+    menu.hidden = true;
+    render();
+  }));
+  combo.addEventListener('blur', () => setTimeout(() => {
+    menu.hidden = true;
+    combo.value = '';
+    render();
+  }, 200));
+  render();
+</script>
+</body></html>"""
+
+DROPDOWN_QUESTION = "How do you identify? (gender identity)"
+
+
+@pytest.fixture(scope="module")
+def dropdown_form_server():
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = DROPDOWN_FORM_HTML.encode()
+
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_address[1]}/apply"
+    server.shutdown()
+
 
 
 async def _eval_on_page(page, expression):
@@ -578,3 +672,93 @@ def test_clipboard_falls_back_when_native_route_is_unavailable(clip_form_server,
             assert reply["via"] == "selection", reply
             assert reply["text"] == "fallback paste text", reply
         assert client.post(f"/api/prefill-sessions/{session['id']}/close").status_code == 200
+
+
+
+async def _control_text(page) -> str:
+    return await page.evaluate(
+        "() => { const box = document.querySelector('.select__control');"
+        " return box ? (box.textContent || '').replace(/\\s+/g, ' ').trim() : ''; }"
+    )
+
+
+def _session_control_text(client: TestClient, session_id: str) -> str:
+    """The dropdown control's rendered text on the live session page, read
+    through the client's blocking portal (the same dispatch the screenshot
+    helper uses)."""
+    live = prefill_sessions._live.get(session_id)
+    portal = getattr(client, "portal", None)
+    assert live is not None and live.page is not None and portal is not None
+    return portal.call(_control_text, live.page)
+
+
+def test_session_selects_the_saved_combobox_answer(dropdown_form_server):
+    """A stored answer selects the matching option in a custom dropdown
+    during a streamed pre-fill. The regression this pins: the filler used
+    to type the answer into the dropdown's search box and report the field
+    filled while the control still showed "Select...". The rendered text
+    of the control — not just the fill report — must show the choice."""
+    email = _unique_email("pfcombo")
+    user_id = _make_user(email)
+    _save_answer(user_id, "gender", DROPDOWN_QUESTION, "Female")
+    app_id = _make_application(user_id, dropdown_form_server)
+    with _logged_in(email) as client:
+        session = _create_session(client, app_id)
+        assert DROPDOWN_QUESTION in session["filled"], session["filled"]
+        assert DROPDOWN_QUESTION not in session["needs_attention"]
+        assert _session_control_text(client, session["id"]) == "Female"
+        _save_e2e_screenshot(client, session["id"], "combobox_answer_selected.png")
+        assert client.post(f"/api/prefill-sessions/{session['id']}/close").status_code == 200
+
+
+def test_session_combobox_answer_matching_no_option_needs_attention(dropdown_form_server):
+    """A stored answer that matches none of the dropdown's options selects
+    nothing: the question stays in needs_attention instead of being
+    reported filled on the strength of typed text."""
+    email = _unique_email("pfcombonone")
+    user_id = _make_user(email)
+    _save_answer(user_id, "gender", DROPDOWN_QUESTION, "Decline to answer")
+    app_id = _make_application(user_id, dropdown_form_server)
+    with _logged_in(email) as client:
+        session = _create_session(client, app_id)
+        assert DROPDOWN_QUESTION not in session["filled"], session["filled"]
+        assert DROPDOWN_QUESTION in session["needs_attention"], session["needs_attention"]
+        assert _session_control_text(client, session["id"]) == "Select..."
+        assert client.post(f"/api/prefill-sessions/{session['id']}/close").status_code == 200
+
+
+def test_local_fill_demotes_a_combobox_fill_that_did_not_happen(dropdown_form_server, monkeypatch):
+    """Verify-and-demote: when a fill reports success but the value never
+    lands in the widget, the field must end up in needs_attention — not in
+    filled, and not in filled_values (the answer-capture diff treats
+    filled_values entries as agent-filled). Fields that really filled
+    keep their filled status."""
+    real_fill_field = formfill._fill_field
+
+    async def stub_fill_field(f, kind, value):
+        if f.get("combobox"):
+            return True  # claims success without touching the page
+        return await real_fill_field(f, kind, value)
+
+    monkeypatch.setattr(formfill, "_fill_field", stub_fill_field)
+    result = asyncio.run(
+        formfill.fill_application(
+            profile={
+                "name": "Priya Nair",
+                "email": "priya.nair@example.com",
+                "phone": "+1 (415) 555-0148",
+            },
+            job={"apply_url": dropdown_form_server},
+            cover="",
+            resume_path="",
+            location="San Francisco, CA",
+            packet_key=f"combo-demote-{uuid.uuid4().hex[:8]}",
+            answers={"gender": "Female"},
+        )
+    )
+    assert result["channel"] == "browser", result["notes"]
+    assert DROPDOWN_QUESTION not in result["filled"], result["filled"]
+    assert DROPDOWN_QUESTION in result["needs_attention"], result["needs_attention"]
+    assert "Full name" in result["filled"]
+    assert formfill._norm(DROPDOWN_QUESTION) not in result["filled_values"]
+

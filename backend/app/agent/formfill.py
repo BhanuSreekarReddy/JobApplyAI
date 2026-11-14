@@ -444,6 +444,91 @@ FILLED_JS = r"""
 })
 """
 
+# Operating a custom dropdown: 'mark' tags the option-looking nodes that
+# already exist (other widgets, page chrome) so they are never mistaken for
+# this dropdown's options; 'options' lists the option texts the open menu
+# currently shows; 'pick' tags the one element whose text is the chosen
+# option so the caller can click it through Playwright.
+COMBOBOX_JS = r"""
+({ id, phase, option }) => {
+  const el = document.querySelector(`[data-jobapply-id="${id}"]`);
+  const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  const OPTIONISH = /option|suggest|dropdown|result|item|menu|pac-|autocomplete|listbox/i;
+  const ctxOf = (n) => [n, n.parentElement, n.parentElement && n.parentElement.parentElement]
+    .filter(Boolean).map((x) => `${x.getAttribute('role') || ''} ${x.className || ''}`).join(' ');
+  const optionish = (n) => n.getAttribute('role') === 'option' || OPTIONISH.test(ctxOf(n));
+  const visible = (n) => !!(n.checkVisibility && n.checkVisibility());
+  const shownOption = (n) => {
+    const text = clean(n.textContent);
+    return !!text && text.length <= 150 && !n.querySelector('input,textarea,select') && visible(n);
+  };
+  const gather = () => {
+    document.querySelectorAll('[data-jobapply-pick]').forEach((n) => n.removeAttribute('data-jobapply-pick'));
+    const listId = el && (el.getAttribute('aria-controls') || el.getAttribute('aria-owns'));
+    const listbox = listId && document.getElementById(listId);
+    let cands;
+    if (listbox) {
+      cands = Array.from(listbox.querySelectorAll('[role=option]'));
+      if (!cands.length) cands = Array.from(listbox.children);
+    } else {
+      cands = Array.from(document.querySelectorAll('[role=option], li, div, span, a'))
+        .filter((n) => !n.hasAttribute('data-jobapply-pre') && optionish(n));
+    }
+    cands = Array.from(new Set(cands)).filter(shownOption);
+    // Leaf-most only: a menu wrapper and the option inside it can both look like candidates.
+    return cands.filter((n) => !cands.some((o) => o !== n && n.contains(o)));
+  };
+  if (phase === 'mark') {
+    document.querySelectorAll('[role=option], li, div, span, a')
+      .forEach((n) => { if (visible(n) && optionish(n)) n.setAttribute('data-jobapply-pre', '1'); });
+    return null;
+  }
+  if (phase === 'options') {
+    return Array.from(new Set(gather().map((n) => clean(n.textContent)).filter(Boolean))).slice(0, 80);
+  }
+  if (phase === 'pick') {
+    const target = gather().find((n) => clean(n.textContent) === clean(option));
+    if (!target) return null;
+    target.setAttribute('data-jobapply-pick', '1');
+    return 'pick';
+  }
+  return null;
+}
+"""
+
+# Read back what each field currently holds, for the post-fill verification
+# pass: a <select> reports its selected option's text, a custom dropdown
+# reports the value it renders (beside the cleared search input, or as the
+# input's own value), and any other control reports its value.
+VERIFY_JS = r"""
+(ids) => {
+  const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  const out = {};
+  for (const i of ids) {
+    const el = document.querySelector(`[data-jobapply-id="${i}"]`);
+    if (!el) { out[i] = null; continue; }
+    if (el.tagName.toLowerCase() === 'select') {
+      const opt = el.options[el.selectedIndex];
+      out[i] = opt ? clean(opt.text) : '';
+    } else if (el.getAttribute('role') === 'combobox') {
+      const typed = clean(el.value || '');
+      if (typed) { out[i] = typed; continue; }
+      const controls = (n) => Array.from(n.querySelectorAll('input:not([type=hidden]),textarea,select'))
+        .filter((c) => c.getAttribute('aria-hidden') !== 'true').length;
+      let box = el.closest('[class*=control]');
+      if (!box) {
+        box = el.parentElement;
+        while (box && box.parentElement && controls(box.parentElement) <= 1 && !box.parentElement.querySelector('label')) box = box.parentElement;
+      }
+      out[i] = box ? clean(box.textContent) : '';
+    } else {
+      out[i] = clean(el.value || '');
+    }
+  }
+  return out;
+}
+"""
+
 # Select one member of a radio group: the member whose label text is exactly
 # the requested option (the caller matched the option text already). Clicking
 # the member's <label> is preferred — it is what a user does, and custom-styled
@@ -752,6 +837,7 @@ async def _fill_open_page(page: Any, values: dict[str, Any]) -> dict[str, Any]:
     todo: list[dict[str, Any]] = []
     used: set[str] = set()
     filled_values: dict[str, str] = {}
+    expected: dict[int, tuple[str, str]] = {}
     for f in _application_form(fields):
         kind = f["kind"]
         if kind in {"resume", "cover_file"} and kind in used:
@@ -768,12 +854,18 @@ async def _fill_open_page(page: Any, values: dict[str, Any]) -> dict[str, Any]:
             if kind:
                 used.add(kind)
             done.append(f)
+            expected[id(f)] = _expectation(f, fill_kind, value)
             if f.get("label"):
                 filled_values[_norm(f["label"])] = str(value)
         elif attempted or (f["required"] and not f["filled"]):
             todo.append(f)
 
     todo = await _drop_filled(todo)
+    # A fill that reported success but did not actually land (a custom
+    # dropdown that never selected, a controlled input that rejected the
+    # set) must not be painted green or listed as filled.
+    done, demoted = await _verify_done(done, expected, filled_values)
+    todo.extend(demoted)
 
     for frame in {id(f["frame"]): f["frame"] for f in done + todo}.values():
         try:
@@ -816,6 +908,83 @@ async def _drop_filled(todo: list[dict[str, Any]]) -> list[dict[str, Any]]:
         except Exception:
             pass
     return [f for f in todo if (id(f["frame"]), f["id"]) not in filled]
+
+
+async def _rendered_values(frame: Any, fields: list[dict[str, Any]]) -> dict[str, Any]:
+    """What each field currently renders as its value (VERIFY_JS), keyed by
+    stringified field id. Empty when the read-back itself failed."""
+    try:
+        got = await frame.evaluate(VERIFY_JS, [f["id"] for f in fields])
+    except Exception:
+        return {}
+    return {str(k): v for k, v in (got or {}).items()}
+
+
+def _expectation(f: dict[str, Any], fill_kind: str | None, value: Any) -> tuple[str, str]:
+    """How a filled field is re-checked before it may be reported filled:
+    ("option", text) — a <select> or custom dropdown must render exactly
+    this option; ("nonempty", "") — a plain input must still hold
+    something; ("skip", "") — no read-back: radios report their own
+    verified state, file values cannot be read back, and locations verify
+    inside their own filler."""
+    if f["type"] in {"radio", "file"} or fill_kind == "location":
+        return ("skip", "")
+    if f["tag"] == "select":
+        chosen = f.get("_chosen_option")
+        if not chosen:
+            try:
+                chosen = (
+                    _pick_years_option(f["options"], int(value))
+                    if fill_kind == "years"
+                    else _pick_option_by_text(f["options"], str(value))
+                )
+            except Exception:
+                chosen = None
+        return ("option", chosen) if chosen else ("skip", "")
+    if f["combobox"]:
+        return ("option", f.get("_chosen_option") or str(value))
+    return ("nonempty", "")
+
+
+async def _verify_done(
+    done: list[dict[str, Any]],
+    expected: dict[int, tuple[str, str]],
+    filled_values: dict[str, str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Re-read every filled field's real state and demote the ones whose
+    value did not actually land. A fill action that completes without an
+    error is not proof: a custom dropdown can accept typed text and still
+    select nothing, and a controlled input can reject a programmatic set.
+    Demoted fields are returned separately so the caller can move them to
+    needs_attention, and their filled_values entries are pruned — the
+    answer-capture diff must never treat a field that did not fill as
+    agent-filled."""
+    checks = [f for f in done if expected.get(id(f), ("skip", ""))[0] != "skip"]
+    bad: set[int] = set()
+    frames = {id(f["frame"]): f["frame"] for f in checks}
+    for key, frame in frames.items():
+        group = [f for f in checks if id(f["frame"]) == key]
+        got = await _rendered_values(frame, group)
+        if not got:
+            continue  # the read-back itself failed; keep the fill's own verdict
+        for f in group:
+            mode, want = expected[id(f)]
+            rendered = got.get(str(f["id"]))
+            if mode == "option":
+                if rendered is None or _norm(rendered) != _norm(want):
+                    bad.add(id(f))
+            elif not (rendered or "").strip():
+                bad.add(id(f))
+    kept: list[dict[str, Any]] = []
+    demoted: list[dict[str, Any]] = []
+    for f in done:
+        if id(f) in bad:
+            demoted.append(f)
+            if f.get("label"):
+                filled_values.pop(_norm(f["label"]), None)
+        else:
+            kept.append(f)
+    return kept, demoted
 
 
 async def _settle(page: Any) -> None:
@@ -1106,12 +1275,72 @@ async def _fill_field(f: dict[str, Any], kind: str, value: Any) -> bool:
         )
         if not option:
             return False
+        f["_chosen_option"] = option
         await loc.select_option(label=option, timeout=5_000)
         return True
     if kind == "location":
         return await _fill_location(f, loc, str(value))
+    if f["combobox"]:
+        return await _fill_combobox(f, loc, str(value))
     await loc.fill(str(value), timeout=5_000)
     return True
+
+
+async def _poll_combobox_choice(f: dict[str, Any], value: str) -> str | None:
+    """Wait for the open dropdown to render options, then return the one
+    the saved answer selects (same matching discipline as radio groups)."""
+    frame = f["frame"]
+    for _ in range(16):
+        await asyncio.sleep(0.25)
+        try:
+            options = await frame.evaluate(COMBOBOX_JS, {"id": f["id"], "phase": "options"}) or []
+        except Exception:
+            options = []
+        if options:
+            return _radio_option({**f, "options": options}, value)
+    return None
+
+
+async def _fill_combobox(f: dict[str, Any], loc: Any, value: str) -> bool:
+    """Operate a custom dropdown (react-select style): open it, type the
+    answer to filter, and click the option it matches. Typing alone selects
+    nothing in these widgets — the search box clears on blur and the control
+    falls back to its placeholder — so success is reported only when the
+    widget actually renders the chosen option afterwards. An answer that
+    matches no option selects nothing: the field is left untouched for the
+    user rather than guessed."""
+    frame = f["frame"]
+    try:
+        await frame.evaluate(COMBOBOX_JS, {"id": f["id"], "phase": "mark"})
+        await loc.click(timeout=5_000)
+        await loc.fill("", timeout=3_000)
+        await loc.press_sequentially(value, delay=40, timeout=10_000)
+        chosen = await _poll_combobox_choice(f, value)
+        if not chosen:
+            # The typed filter can hide every option when the stored wording
+            # differs from the option texts; drop the filter and match the
+            # full list before giving up.
+            await loc.fill("", timeout=3_000)
+            chosen = await _poll_combobox_choice(f, value)
+        if not chosen:
+            await loc.fill("", timeout=3_000)
+            await loc.press("Escape", timeout=2_000)
+            return False
+        if await frame.evaluate(COMBOBOX_JS, {"id": f["id"], "phase": "pick", "option": chosen}) != "pick":
+            return False
+        target = frame.locator('[data-jobapply-pick="1"]').first
+        if await target.evaluate(OPTION_MAY_SUBMIT_JS):
+            return False
+        await target.click(timeout=2_500)
+        f["_chosen_option"] = chosen
+        for _ in range(12):
+            await asyncio.sleep(0.25)
+            got = await _rendered_values(frame, [f])
+            if _norm(got.get(str(f["id"])) or "") == _norm(chosen):
+                return True
+        return False
+    except Exception:
+        return False
 
 
 async def _fill_location(f: dict[str, Any], loc: Any, value: str) -> bool:
