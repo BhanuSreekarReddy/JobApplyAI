@@ -639,6 +639,78 @@ def test_native_copy_then_paste_round_trip(clip_form_server):
         assert client.post(f"/api/prefill-sessions/{session['id']}/close").status_code == 200
 
 
+def test_paste_key_pastes_the_session_clipboards_own_text(clip_form_server):
+    """Copy/paste WITHIN the streamed page when the local machine has no
+    text to offer: the copy leaves the text on the SESSION browser's
+    clipboard, and "paste-key" asks for a genuine Ctrl+V there without
+    the server writing that clipboard first. The text must land in the
+    second field, the page must observe a trusted paste event carrying
+    it, and the session clipboard afterwards must be exactly what the
+    copy left there — the paste never overwrites it."""
+    email = _unique_email("pfpastekey")
+    user_id = _make_user(email)
+    app_id = _make_application(user_id, clip_form_server)
+    with _logged_in(email) as client:
+        session = _create_session(client, app_id)
+        with client.websocket_connect(f"/api/prefill-sessions/{session['id']}/stream") as ws:
+            ws.receive_bytes()
+            _click_field(ws, 200, 35)
+            ws.send_json({"type": "paste", "text": "within stream text"})
+            assert _await_reply(ws, "paste-result")["via"] == "native"
+            _page_eval(
+                client,
+                session["id"],
+                "() => { const el = document.getElementById('first');"
+                " el.setSelectionRange(0, el.value.length); }",
+            )
+            ws.send_json({"type": "copy"})
+            reply = _await_reply(ws, "clipboard")
+            assert reply["text"] == "within stream text", reply
+            before = _page_eval(
+                client, session["id"], "(async () => await navigator.clipboard.readText())"
+            )
+            assert before == "within stream text", before
+            _click_field(ws, 200, 115)
+            assert _page_eval(client, session["id"], "() => document.activeElement.id") == "second"
+            ws.send_json({"type": "paste-key"})
+            reply = _await_reply(ws, "paste-result")
+            assert reply["via"] == "native", reply
+            value = _page_eval(client, session["id"], "() => document.getElementById('second').value")
+            assert value == "within stream text", value
+            pastes = _page_eval(client, session["id"], "() => window.__pastes")
+            assert pastes[-1] == {
+                "text": "within stream text",
+                "target": "second",
+                "trusted": True,
+            }, pastes
+            after = _page_eval(
+                client, session["id"], "(async () => await navigator.clipboard.readText())"
+            )
+            assert after == before == "within stream text", after
+        assert client.post(f"/api/prefill-sessions/{session['id']}/close").status_code == 200
+
+
+def test_paste_key_with_an_empty_session_clipboard_inserts_nothing(clip_form_server):
+    """A "paste-key" when the session browser's clipboard holds nothing
+    must not invent text: the focused field stays empty. (A session
+    browser is a fresh profile; nothing has copied into it yet.)"""
+    email = _unique_email("pfpastekeyempty")
+    user_id = _make_user(email)
+    app_id = _make_application(user_id, clip_form_server)
+    with _logged_in(email) as client:
+        session = _create_session(client, app_id)
+        with client.websocket_connect(f"/api/prefill-sessions/{session['id']}/stream") as ws:
+            ws.receive_bytes()
+            _click_field(ws, 200, 35)
+            assert _page_eval(client, session["id"], "() => document.activeElement.id") == "first"
+            ws.send_json({"type": "paste-key"})
+            reply = _await_reply(ws, "paste-result")
+            assert reply["via"] == "native", reply
+            value = _page_eval(client, session["id"], "() => document.getElementById('first').value")
+            assert value == "", value
+        assert client.post(f"/api/prefill-sessions/{session['id']}/close").status_code == 200
+
+
 def test_clipboard_falls_back_when_native_route_is_unavailable(clip_form_server, monkeypatch):
     """With the native clipboard route disabled (as when the browser
     denies clipboard permission/API access), paste still lands — via
