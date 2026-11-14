@@ -24,7 +24,7 @@ from .agent.profile import heuristic_profile, split_name
 from .agent.resume import extract_text
 from .agent.runner import execute_run, primary_location, _app_payload, _job_payload, _public_profile, _upsert_profile
 from .agent.seen import advance_stage_on_submission, record_application_seen
-from .config import UPLOAD_DIR, settings
+from .config import UPLOAD_DIR, cors_origin_list, settings
 from .db import Base, SessionLocal, engine, upgrade_schema
 from .models import (
     AdminAuditLog,
@@ -86,7 +86,7 @@ def _match_key(title: str, company: str) -> str:
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=cors_origin_list(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -38,8 +38,19 @@ class Settings(BaseSettings):
     # build their verification and password-reset links from it, so hosted
     # deployments must set it to the public address.
     public_base_url: str = "http://localhost:5173"
+    # Browser origins allowed to call the API, comma-separated. Defaults to
+    # the local Vite dev server; hosted deployments set CORS_ORIGINS to the
+    # public frontend origin. Never a wildcard: the API takes credentialed
+    # requests, so an origin list is a real allowlist.
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
 
 settings = Settings()
+
+
+def cors_origin_list() -> list[str]:
+    """The configured CORS allowlist, parsed from the comma-separated
+    CORS_ORIGINS setting."""
+    return [origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()]
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
