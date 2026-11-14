@@ -14,6 +14,7 @@ from typing import Any
 
 from ..config import BROWSER_PROFILE_DIR, UPLOAD_DIR, settings
 from .locations import US_STATES
+from .submission import watch_page_for_submission
 
 FILL_TIMEOUT_S = 120
 ATTR = "data-jobapply-id"
@@ -724,8 +725,28 @@ _filled_pages: dict[str, dict[str, Any]] = {}
 
 
 def _register_filled_page(packet_key: str, page: Any, filled_values: dict[str, str] | None) -> None:
-    if packet_key and page is not None:
-        _filled_pages[packet_key] = {"page": page, "filled_values": dict(filled_values or {})}
+    if not packet_key or page is None:
+        return
+    previous = _filled_pages.get(packet_key)
+    if previous is not None:
+        task = previous.get("submission_task")
+        if task is not None:
+            task.cancel()
+    entry: dict[str, Any] = {"page": page, "filled_values": dict(filled_values or {}), "submission_task": None}
+    _filled_pages[packet_key] = entry
+    # Watch the tab for the employer's submission confirmation: when the
+    # user clicks Submit themselves and the site confirms, the packet is
+    # marked applied automatically (agent.submission) instead of needing
+    # a second, manual "Mark submitted" back in the app. The watcher runs
+    # on this page's own event loop — registration happens inside the
+    # browser worker — and stops on detection, page close, or timeout.
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    entry["submission_task"] = loop.create_task(
+        watch_page_for_submission(page, packet_key=packet_key)
+    )
 
 
 def has_filled_page(packet_key: str) -> bool:

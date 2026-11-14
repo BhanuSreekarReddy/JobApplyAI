@@ -53,6 +53,7 @@ from .profile_source import fill_profile
 from .agent import formfill
 from .agent.runner import primary_location
 from .agent.seen import advance_stage_on_submission, record_application_seen
+from .agent.submission import detect_submission, mark_detected_submission, watch_page_for_submission
 from .config import DATA_DIR
 from .db import SessionLocal
 from .models import Application, JobMatch, PrefillSessionRecord, Run
@@ -86,6 +87,11 @@ class _Live:
         # startup; the answer-capture diff compares the live form against
         # this so only values the USER typed are offered for saving.
         self.filled_values: dict[str, str] = {}
+        # Submission detection: a watcher task polls the page while the
+        # session runs, and _close_live checks once more at the end. The
+        # evidence is the confirmation signal that marked the packet.
+        self.submission_task: Any = None
+        self.submission_evidence: str | None = None
 
 
 _live: dict[str, _Live] = {}
@@ -147,10 +153,54 @@ async def _stash_pending_candidates(live: _Live) -> None:
         db.close()
 
 
+async def _detect_and_mark_submission(live: _Live) -> None:
+    """Check the session's page for the employer's submission
+    confirmation and, when one is showing, mark the packet applied
+    through the shared submission path. Runs when a session ends, so a
+    submission the periodic watcher had no chance to see (the user
+    submitted and closed the view immediately) is still caught."""
+    if live.page is None:
+        return
+    try:
+        evidence = await detect_submission(live.page)
+    except Exception:
+        return
+    if not evidence:
+        return
+    live.submission_evidence = evidence
+    db = SessionLocal()
+    try:
+        record = db.get(PrefillSessionRecord, live.id)
+        application_id = record.application_id if record is not None else 0
+    finally:
+        db.close()
+    if application_id:
+        try:
+            mark_detected_submission(application_id, evidence)
+        except Exception:
+            log.warning("prefill session %s: submission marking failed", live.id, exc_info=True)
+
+
+async def _watch_live_submission(live: _Live, application_id: int) -> None:
+    """Poll the session page while it runs; on the employer's
+    confirmation, mark the packet applied (the tracker reflects it on
+    the next refresh — no second click in the app)."""
+    evidence = await watch_page_for_submission(live.page, application_id=application_id)
+    if evidence:
+        live.submission_evidence = evidence
+
+
 async def _close_live(live: _Live, reason: str) -> None:
     if live.closed:
         return
     live.closed = True
+    task = live.submission_task
+    if task is not None and task is not asyncio.current_task():
+        task.cancel()
+    # A session that failed to start never showed the user a form, so
+    # nothing on its page can be a submission they made.
+    if reason != "startup failed":
+        await _detect_and_mark_submission(live)
     await _stash_pending_candidates(live)
     try:
         if live.cdp is not None:
@@ -323,6 +373,7 @@ async def create_prefill_session(body: CreateSession, request: Request):
         payload = _payload(record)
     finally:
         db.close()
+    live.submission_task = asyncio.ensure_future(_watch_live_submission(live, body.application_id))
     log.info("prefill session %s created for user %s (application %s)", session_id, user.id, body.application_id)
     return payload
 

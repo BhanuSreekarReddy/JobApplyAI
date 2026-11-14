@@ -86,6 +86,33 @@ def advance_stage_on_submission(db: Session, application, status: str) -> None:
     db.commit()
 
 
+def mark_application_submitted(db: Session, application, job=None, *, evidence: str | None = None) -> bool:
+    """Mark an application submitted through the one shared code path.
+
+    The tracker's manual "Mark submitted" action and an automatically
+    detected employer confirmation both go through here, so they can never
+    drift apart: the status becomes "applied", the tracker stage advances,
+    the job is recorded as seen, and the note says how the submission was
+    established. With `evidence`, the note records the confirmation signal
+    that was detected on the employer's page; without it, the note is the
+    manual one. Returns False (a no-op) when the application is already
+    marked submitted — the existing note is left untouched."""
+    if application is None or application.status == SUBMITTED_STATUS:
+        return False
+    application.status = SUBMITTED_STATUS
+    if evidence:
+        note = f"Marked applied automatically — confirmation detected: {evidence}."
+    else:
+        note = "Submitted by you on the employer site."
+    if note not in (application.notes or ""):
+        application.notes = f"{note} " + (application.notes or "")
+    db.commit()
+    db.refresh(application)
+    record_application_seen(db, application, job, SUBMITTED_STATUS)
+    advance_stage_on_submission(db, application, SUBMITTED_STATUS)
+    return True
+
+
 def record_seen(db: Session, run_id: str, job: dict[str, Any], status: str, user_id: int | None = None) -> SeenJob:
     """Record a prepared or sent application. Re-recording only refreshes the
     status and run; the original first-seen date is kept."""
