@@ -1351,6 +1351,11 @@ async def apply_from_link(body: JobLink, request: Request):
         db.add(application)
         db.commit()
         db.refresh(application)
+        # An application created from a link is in an outcome state
+        # (prepared, or the fill outcome) just like one a run produced, so
+        # it records its seen row through the same helper as every other
+        # outcome path — otherwise the job can resurface later as "new".
+        _record_application_seen(db, application, row, result["status"])
         return {"job": _job_payload(row), "application": _app_payload(application)}
     finally:
         db.close()
