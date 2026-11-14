@@ -140,6 +140,11 @@ function Workspace({
   const [review, setReview] = useState<Application[]>([]);
   const [draftLetters, setDraftLetters] = useState<Record<number, string>>({});
   const [working, setWorking] = useState<number | null>(null);
+  // Applications approved in this session, by id. Approving no longer
+  // navigates anywhere, and an approved packet leaves the pending-review
+  // queue on the next refresh — this keeps its card rendered in place,
+  // showing the post-approval controls, until the user moves on.
+  const [justApproved, setJustApproved] = useState<Record<number, Application>>({});
   const [trackerDrafts, setTrackerDrafts] = useState<
     Record<number, { stage: string; user_notes: string; follow_up_date: string }>
   >({});
@@ -153,6 +158,11 @@ function Workspace({
   // In My applications, packets still waiting for review come first.
   const sortedHistory = [...history].sort(
     (a, b) => (a.status === "pending_review" ? 0 : 1) - (b.status === "pending_review" ? 0 : 1),
+  );
+  // Approved this session but already out of the pending queue: their
+  // cards stay at the top of the review list, in approval order.
+  const approvedPinned = Object.values(justApproved).filter(
+    (a) => !review.some((r) => r.id === a.id),
   );
 
   // Load the review queue (for the tab badge) and the past runs (for the
@@ -492,23 +502,11 @@ function Workspace({
     void refreshReview();
     if (updated) {
       replaceApp(updated);
-      await goToForm(updated);
-    }
-  }
-
-  // After approval, take the user straight to the live application form,
-  // in the Applications tab: a streamed session in hosted mode, or the
-  // local fill when the approval itself did not already run one. An
-  // application that was emailed (status "applied") has no form to open,
-  // and a packet without an apply URL stays with the current behavior.
-  async function goToForm(app: Application) {
-    if (!app.apply_url || app.status === "applied") return;
-    setTrackerFilter("all");
-    await loadTracker();
-    if (hosted) {
-      await startPrefill(app);
-    } else if (app.status === "prepared") {
-      await appAction(app, "fill");
+      // Approval confirms in place: the user stays on the current list
+      // and the card swaps to its post-approval controls (Fill form in
+      // browser / Mark submitted), so approving several jobs in a row
+      // never pulls the user away mid-flow.
+      setJustApproved((m) => ({ ...m, [updated.id]: updated }));
     }
   }
 
@@ -529,6 +527,36 @@ function Workspace({
   }
 
   function reviewCard(app: Application) {
+    if (app.status !== "pending_review") {
+      // Approved in place: same card the run view shows after approval —
+      // the cover letter collapses and the controls swap to the
+      // post-approval set (Fill form in browser / Mark submitted).
+      return (
+        <article className="job" key={app.id}>
+          <header>
+            <h3>
+              {app.title} · {app.company}
+            </h3>
+            <span className={`status ${app.status}`}>{app.status}</span>
+          </header>
+          <p className="meta">
+            {app.channel} — {app.notes}
+          </p>
+          {app.apply_url ? (
+            <a href={app.apply_url} target="_blank" rel="noreferrer">
+              Apply on employer site
+            </a>
+          ) : null}
+          <div>
+            <button className="ghost" onClick={() => setOpenCover(openCover === app.id ? null : app.id)}>
+              {openCover === app.id ? "Hide letter" : "Cover letter"}
+            </button>
+            {appButtons(app)}
+          </div>
+          {openCover === app.id ? <div className="cover">{app.cover_letter}</div> : null}
+        </article>
+      );
+    }
     return (
       <article className="job" key={app.id}>
         <header>
@@ -924,10 +952,13 @@ function Workspace({
                 Nothing here has been sent. Edit a letter, approve it to send, or skip it.
               </p>
               <div className="jobs">
-                {review.length === 0 ? (
+                {review.length === 0 && approvedPinned.length === 0 ? (
                   <p className="empty">No applications waiting for review.</p>
                 ) : (
-                  review.map((app) => reviewCard(app))
+                  <>
+                    {approvedPinned.map((app) => reviewCard(app))}
+                    {review.map((app) => reviewCard(app))}
+                  </>
                 )}
               </div>
             </>
