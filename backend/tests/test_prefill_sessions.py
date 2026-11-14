@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from app import auth, main
+from app import auth, main, prefill_sessions
 from app.db import SessionLocal
 from app.models import Application, PrefillSessionRecord, ProfileAnswer, Run, SeenJob, User
 
@@ -144,6 +144,30 @@ def _wait_for_status(client: TestClient, session_id: str, status: str, timeout: 
     return payload
 
 
+SCREENSHOTS_DIR = Path(__file__).parent / "e2e_screenshots"
+
+
+async def _take_screenshot(page, path: Path) -> None:
+    await page.screenshot(path=str(path))
+
+
+def _save_e2e_screenshot(client: TestClient, session_id: str, filename: str) -> None:
+    """Save a PNG of the live session page into e2e_screenshots/ as
+    review evidence. Purely a side effect: the page belongs to the app's
+    event loop, so the capture is dispatched through the client's
+    blocking portal, and any failure is swallowed — the assertions are
+    the test, the screenshot never is."""
+    try:
+        live = prefill_sessions._live.get(session_id)
+        portal = getattr(client, "portal", None)
+        if live is None or live.page is None or portal is None:
+            return
+        SCREENSHOTS_DIR.mkdir(exist_ok=True)
+        portal.call(_take_screenshot, live.page, SCREENSHOTS_DIR / filename)
+    except Exception:
+        pass
+
+
 def test_session_create_for_another_users_application_is_404(form_server):
     owner_id = _make_user(_unique_email("pfowner"))
     other_email = _unique_email("pfother")
@@ -229,6 +253,7 @@ def test_real_session_fills_form_and_streams_frames(form_server):
         assert "Full name" in filled, filled
         assert "Email" in filled, filled
         assert "Phone" in filled, filled
+        _save_e2e_screenshot(client, session["id"], "session_form_filled_from_profile.png")
 
         with SessionLocal() as db:
             profile_dir = Path(db.get(PrefillSessionRecord, session["id"]).profile_dir)
@@ -293,6 +318,14 @@ def test_typed_characters_appear_once(type_form_server):
             r = client.post(f"/api/prefill-sessions/{session['id']}/answer-candidates")
             assert r.status_code == 200, r.text
             candidates = r.json()["candidates"]
+            # The assertions below read `candidates`, already collected;
+            # this extra message exercises the clipboard paste-in path
+            # (insert-text over the same stream) purely so its result can
+            # be screenshotted as evidence — the field ends up holding
+            # the key-typed "ab" followed by the pasted-in text.
+            ws.send_json({"type": "insert-text", "text": " pasted-in"})
+            time.sleep(0.75)
+            _save_e2e_screenshot(client, session["id"], "clipboard_paste_in.png")
         assert client.post(f"/api/prefill-sessions/{session['id']}/close").status_code == 200
     nick = [c for c in candidates if "Nickname" in c["question"]]
     assert nick, f"no Nickname candidate in {candidates}"
@@ -357,6 +390,7 @@ def test_session_selects_the_saved_radio_answer(radio_form_server):
         session = _create_session(client, app_id)
         assert RADIO_QUESTION in session["filled"], session["filled"]
         assert RADIO_QUESTION not in session["needs_attention"]
+        _save_e2e_screenshot(client, session["id"], "radio_answer_selected.png")
         assert client.post(f"/api/prefill-sessions/{session['id']}/close").status_code == 200
 
 

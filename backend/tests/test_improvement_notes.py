@@ -21,6 +21,7 @@ import json
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -305,6 +306,30 @@ def test_from_link_uses_saved_profile(client, saved_profile, monkeypatch):
         _cleanup_run(run_id)
 
 
+SCREENSHOTS_DIR = Path(__file__).parent / "e2e_screenshots"
+
+
+async def _take_screenshot(page, path: Path) -> None:
+    await page.screenshot(path=str(path))
+
+
+def _save_e2e_screenshot(client: TestClient, session_id: str, filename: str) -> None:
+    """Save a PNG of the live session page into e2e_screenshots/ as
+    review evidence. Purely a side effect: the page belongs to the app's
+    event loop, so the capture is dispatched through the client's
+    blocking portal, and any failure is swallowed — the assertions are
+    the test, the screenshot never is."""
+    try:
+        live = prefill_sessions._live.get(session_id)
+        portal = getattr(client, "portal", None)
+        if live is None or live.page is None or portal is None:
+            return
+        SCREENSHOTS_DIR.mkdir(exist_ok=True)
+        portal.call(_take_screenshot, live.page, SCREENSHOTS_DIR / filename)
+    except Exception:
+        pass
+
+
 # ------------------------------------------- streamed session profile sync
 
 SESSION_FORM_HTML = """<!doctype html>
@@ -440,6 +465,19 @@ def test_session_fill_uses_saved_profile(session_form_server, monkeypatch, real_
             assert captured["last_name"] == "Nair"
             assert captured["email"] == "priya@example.com"
             assert client.post(f"/api/prefill-sessions/{session_id}/close").status_code == 200
+            # Evidence for the PR: the stub above captures the values the
+            # filler receives, so it never renders them into the page.
+            # Undo the stub and open a second, real session — the app's
+            # own filler fills this same form from the same saved profile
+            # — and screenshot the rendered result (separate First name /
+            # Last name fields populated from the profile page's values,
+            # not the run snapshot's "Wrong"/"Snapshot").
+            monkeypatch.undo()
+            r2 = client.post("/api/prefill-sessions", json={"application_id": app_id})
+            assert r2.status_code == 200, r2.text
+            session2_id = r2.json()["id"]
+            _save_e2e_screenshot(client, session2_id, "profile_sync_first_last_name.png")
+            assert client.post(f"/api/prefill-sessions/{session2_id}/close").status_code == 200
     finally:
         _cleanup_run(run_id)
         _drop_user_rows(user_id)
