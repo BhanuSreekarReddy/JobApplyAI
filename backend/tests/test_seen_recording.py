@@ -143,6 +143,35 @@ def test_skip_records(client, seeded):
     assert rows[0].status == "skipped"
 
 
+def test_mark_submitted_records_seen(client, seeded):
+    """The tracker's 'Mark submitted' button PATCHes the application status;
+    that outcome must land in Previously applied like the approve/fill paths."""
+    app = seeded("seen-mark-applied-run", browser_fill=0)
+    res = client.patch(f"/api/applications/{app.id}", json={"status": "applied"})
+    assert res.status_code == 200
+    assert res.json()["status"] == "applied"
+
+    rows = _seen_rows("seen-mark-applied-run")
+    assert len(rows) == 1
+    assert rows[0].status == "applied"
+
+    listed = client.get("/api/seen").json()
+    mine = [r for r in listed if r["run_id"] == "seen-mark-applied-run"]
+    assert len(mine) == 1
+    assert mine[0]["status"] == "applied"
+
+
+def test_mark_filled_records_seen(client, seeded):
+    app = seeded("seen-mark-filled-run", browser_fill=0)
+    res = client.patch(f"/api/applications/{app.id}", json={"status": "filled"})
+    assert res.status_code == 200
+    assert res.json()["status"] == "filled"
+
+    rows = _seen_rows("seen-mark-filled-run")
+    assert len(rows) == 1
+    assert rows[0].status == "filled"
+
+
 def test_failed_approval_records_nothing(client, seeded, monkeypatch):
     def fake_apply(**kwargs):
         return {"status": "failed", "channel": "email", "notes": "SMTP unavailable."}

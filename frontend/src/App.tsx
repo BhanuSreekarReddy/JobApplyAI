@@ -1,6 +1,20 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import Companies from "./Companies";
 import JobLink from "./JobLink";
+import PrefillView from "./Prefill";
+import {
+  AdminPage,
+  AuthPage,
+  AuthUser,
+  ForgotPage,
+  Landing,
+  LoginPage,
+  ProfilePage,
+  PublicSummary,
+  RegisterPage,
+  ResetPage,
+  VerifyPage,
+} from "./auth";
 
 type Profile = {
   name?: string;
@@ -43,6 +57,7 @@ type Application = {
 };
 
 const STAGES: { value: string; label: string }[] = [
+  { value: "not_applied", label: "Not applied" },
   { value: "applied", label: "Applied" },
   { value: "reply", label: "Recruiter reply" },
   { value: "screen", label: "Screen" },
@@ -85,8 +100,19 @@ type RunSummary = {
   created_at: string | null;
 };
 
-export default function App() {
-  const [tab, setTab] = useState<"run" | "tracker" | "companies" | "review" | "history">("run");
+function Workspace({
+  user,
+  hosted,
+  onLogout,
+}: {
+  user: AuthUser;
+  hosted: boolean;
+  onLogout: () => void;
+}) {
+  const [tab, setTab] = useState<"run" | "tracker" | "companies" | "profile" | "admin">("run");
+  const [trackerFilter, setTrackerFilter] = useState<"all" | "needs_review" | "seen">("all");
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [prefillSession, setPrefillSession] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [locations, setLocations] = useState("San Francisco, CA, Remote");
   const [email, setEmail] = useState("");
@@ -107,9 +133,22 @@ export default function App() {
   >({});
   const [runHistory, setRunHistory] = useState<RunSummary[]>([]);
   const [newOnly, setNewOnly] = useState(false);
+  const [showAllMatches, setShowAllMatches] = useState(false);
   const [seen, setSeen] = useState<SeenJob[]>([]);
 
   const profile = run?.profile;
+  const matchedJobs = (run?.jobs || []).filter((job) => !newOnly || job.is_new);
+  // In My applications, packets still waiting for review come first.
+  const sortedHistory = [...history].sort(
+    (a, b) => (a.status === "pending_review" ? 0 : 1) - (b.status === "pending_review" ? 0 : 1),
+  );
+
+  // Load the review queue (for the tab badge) and the past runs (for the
+  // Recent runs list) up front, so both are current before they are viewed.
+  useEffect(() => {
+    void refreshReview();
+    void refreshRunHistory();
+  }, []);
 
   function replaceApp(updated: Application) {
     setRun((r) => (r ? { ...r, applications: r.applications.map((a) => (a.id === updated.id ? updated : a)) } : r));
@@ -141,11 +180,31 @@ export default function App() {
     }
   }
 
+  async function startPrefill(app: Application) {
+    // Hosted mode: pre-fill runs as a streamed session in an ephemeral
+    // server-side browser instead of a local browser window.
+    setWorking(app.id);
+    try {
+      const res = await fetch("/api/prefill-sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ application_id: app.id }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const session = (await res.json()) as { id: string };
+      setPrefillSession(session.id);
+    } catch (err) {
+      replaceApp({ ...app, notes: err instanceof Error ? err.message : "Request failed" });
+    } finally {
+      setWorking(null);
+    }
+  }
+
   function appButtons(app: Application) {
     if (app.status === "applied") return null;
     if (app.status === "pending_review")
       return (
-        <button className="ghost" onClick={() => void loadReview()}>
+        <button className="ghost" onClick={() => void goToReview()}>
           Review
         </button>
       );
@@ -153,8 +212,18 @@ export default function App() {
     return (
       <>
         {app.apply_url ? (
-          <button className="ghost" disabled={working !== null} onClick={() => void appAction(app, "fill")}>
-            {pending ? "Filling…" : app.status === "filled" ? "Fill again" : "Fill form in browser"}
+          <button
+            className="ghost"
+            disabled={working !== null}
+            onClick={() => void (hosted ? startPrefill(app) : appAction(app, "fill"))}
+          >
+            {pending
+              ? hosted
+                ? "Opening…"
+                : "Filling…"
+              : app.status === "filled"
+                ? "Fill again"
+                : "Fill form in browser"}
           </button>
         ) : null}
         <button className="ghost" disabled={working !== null} onClick={() => void appAction(app, "submitted")}>
@@ -180,6 +249,7 @@ export default function App() {
         source.close();
         void refresh(id);
         void refreshReview();
+        void refreshRunHistory();
       }
       if (event.type === "profile" || event.type === "job" || event.type === "application") {
         void refresh(id);
@@ -248,7 +318,7 @@ export default function App() {
         rows.map((a) => [
           a.id,
           {
-            stage: a.pipeline_stage || "applied",
+            stage: a.pipeline_stage || "not_applied",
             user_notes: a.user_notes || "",
             follow_up_date: a.follow_up_date || "",
           },
@@ -257,6 +327,7 @@ export default function App() {
     );
     const seenRows = await fetch("/api/seen").then((r) => r.json());
     setSeen(seenRows);
+    await refreshReview();
   }
 
   async function saveTracker(id: number) {
@@ -284,9 +355,10 @@ export default function App() {
     });
   }
 
-  async function loadReview() {
-    setTab("review");
-    await refreshReview();
+  async function goToReview() {
+    setTab("tracker");
+    setTrackerFilter("needs_review");
+    await loadTracker();
   }
 
   async function approveApp(id: number) {
@@ -357,8 +429,7 @@ export default function App() {
     );
   }
 
-  async function loadRunHistory() {
-    setTab("history");
+  async function refreshRunHistory() {
     const rows: RunSummary[] = await fetch("/api/runs").then((r) => r.json());
     setRunHistory(rows);
   }
@@ -393,23 +464,52 @@ export default function App() {
         </div>
         <div className="tabs">
           <button className={tab === "run" ? "active" : ""} onClick={() => setTab("run")}>
-            Agent
+            Jobs
           </button>
           <button className={tab === "tracker" ? "active" : ""} onClick={() => void loadTracker()}>
-            Applications
-          </button>
-          <button className={tab === "review" ? "active" : ""} onClick={() => void loadReview()}>
-            Review
+            Applications{review.length > 0 ? ` (${review.length})` : ""}
           </button>
           <button className={tab === "companies" ? "active" : ""} onClick={() => setTab("companies")}>
             Companies
           </button>
-          <button className={tab === "history" ? "active" : ""} onClick={() => void loadRunHistory()}>
-            Past runs
-          </button>
+          {user.role === "admin" ? (
+            <button className={tab === "admin" ? "active" : ""} onClick={() => setTab("admin")}>
+              Admin
+            </button>
+          ) : null}
+          <div className="account">
+            <button className={tab === "profile" ? "active" : ""} onClick={() => setMenuOpen((o) => !o)}>
+              {user.email}
+              {user.email_verified ? "" : " (unverified)"}
+            </button>
+            {menuOpen ? (
+              <div className="account-menu">
+                <button
+                  onClick={() => {
+                    setTab("profile");
+                    setMenuOpen(false);
+                  }}
+                >
+                  Profile
+                </button>
+                <button onClick={onLogout}>Sign out</button>
+              </div>
+            ) : null}
+          </div>
         </div>
       </header>
 
+      {!user.email_verified ? (
+        <p className="notice error">
+          Your email is not verified yet — check your inbox for the verification link. You can
+          look around, but runs cannot start until the address is verified.
+        </p>
+      ) : null}
+      {prefillSession ? (
+        <PrefillView sessionId={prefillSession} onClose={() => setPrefillSession(null)} />
+      ) : null}
+      {tab === "profile" ? <ProfilePage /> : null}
+      {tab === "admin" && user.role === "admin" ? <AdminPage /> : null}
       {tab === "companies" ? <Companies /> : null}
       {tab === "run" ? (
         <div className="grid">
@@ -492,6 +592,37 @@ export default function App() {
             </button>
           </form>
           <JobLink<Application> runId={run?.id} onAdded={addApp} />
+          <section className="card">
+            <h2>Recent runs</h2>
+            <p className="lede">Reopen any past run, or re-run it with the same settings and resume.</p>
+            <div className="jobs">
+              {runHistory.length === 0 ? (
+                <p className="empty">No runs yet.</p>
+              ) : (
+                runHistory.map((r) => (
+                  <article className="job" key={r.id}>
+                    <header>
+                      <h3>Run {r.id}</h3>
+                      <span className={`status ${r.status}`}>{r.status}</span>
+                    </header>
+                    <p className="meta">
+                      {r.locations}
+                      {r.created_at ? ` · ${r.created_at.slice(0, 10)}` : ""}
+                    </p>
+                    <p className="meta">{r.summary || r.error}</p>
+                    <div className="row">
+                      <button className="ghost" onClick={() => void openHistoryRun(r.id)}>
+                        Open
+                      </button>
+                      <button className="ghost" onClick={() => void rerunRun(r.id)}>
+                        Re-run
+                      </button>
+                    </div>
+                  </article>
+                ))
+              )}
+            </div>
+          </section>
           </div>
 
           <section className="card">
@@ -517,38 +648,9 @@ export default function App() {
             <div className="log">
               {logs.length === 0 ? "Idle." : logs.map((line, i) => <div key={i}>› {line}</div>)}
             </div>
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={newOnly}
-                onChange={(e) => setNewOnly(e.target.checked)}
-              />
-              Only matches no earlier run has shown
-            </label>
-            <div className="jobs" style={{ marginTop: 16 }}>
-              {(run?.jobs || [])
-                .filter((job) => !newOnly || job.is_new)
-                .map((job) => (
-                  <article className="job" key={job.id}>
-                    <header>
-                      <h3>{job.title}</h3>
-                      <span className="score">{job.score.toFixed(0)}</span>
-                    </header>
-                    <p className="meta">
-                      {job.company} · {job.location || (job.remote ? "Remote" : "")} · {job.source}
-                      {job.posted_date ? ` · posted ${job.posted_date}` : ""}
-                    </p>
-                    {job.is_new ? <p className="meta">New since your last runs</p> : null}
-                    <p className="meta">{job.reasons}</p>
-                    <a href={job.apply_url || job.url} target="_blank" rel="noreferrer">
-                      Open posting
-                    </a>
-                  </article>
-                ))}
-            </div>
             {(run?.applications || []).length > 0 && (
               <div className="jobs" style={{ marginTop: 18 }}>
-                <h2>Packets</h2>
+                <h2>Applications prepared</h2>
                 {run!.applications.map((app) =>
                   app.status === "pending_review" ? (
                     reviewCard(app)
@@ -579,51 +681,119 @@ export default function App() {
                 ))}
               </div>
             )}
+            <div className="jobs" style={{ marginTop: 18 }}>
+              <h2>All matches</h2>
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={newOnly}
+                  onChange={(e) => setNewOnly(e.target.checked)}
+                />
+                Only matches no earlier run has shown
+              </label>
+              {matchedJobs
+                .slice(0, showAllMatches ? matchedJobs.length : 5)
+                .map((job) => (
+                  <article className="job" key={job.id}>
+                    <header>
+                      <h3>{job.title}</h3>
+                      <span className="score">{job.score.toFixed(0)}</span>
+                    </header>
+                    <p className="meta">
+                      {job.company} · {job.location || (job.remote ? "Remote" : "")} · {job.source}
+                      {job.posted_date ? ` · posted ${job.posted_date}` : ""}
+                    </p>
+                    {job.is_new ? <p className="meta">New since your last runs</p> : null}
+                    <p className="meta">{job.reasons}</p>
+                    <a href={job.apply_url || job.url} target="_blank" rel="noreferrer">
+                      Open posting
+                    </a>
+                  </article>
+                ))}
+              {matchedJobs.length > 5 ? (
+                <button className="ghost" onClick={() => setShowAllMatches((s) => !s)}>
+                  {showAllMatches ? "Show fewer" : `Show all ${matchedJobs.length} matches`}
+                </button>
+              ) : null}
+            </div>
           </section>
         </div>
-      ) : tab === "history" ? (
-        <section className="card">
-          <h2>Past runs</h2>
-          <p className="lede">Reopen any past run, or re-run it with the same settings and resume.</p>
-          <div className="jobs">
-            {runHistory.length === 0 ? (
-              <p className="empty">No runs yet.</p>
-            ) : (
-              runHistory.map((r) => (
-                <article className="job" key={r.id}>
-                  <header>
-                    <h3>Run {r.id}</h3>
-                    <span className={`status ${r.status}`}>{r.status}</span>
-                  </header>
-                  <p className="meta">
-                    {r.locations}
-                    {r.created_at ? ` · ${r.created_at.slice(0, 10)}` : ""}
-                  </p>
-                  <p className="meta">{r.summary || r.error}</p>
-                  <div className="row">
-                    <button className="ghost" onClick={() => void openHistoryRun(r.id)}>
-                      Open
-                    </button>
-                    <button className="ghost" onClick={() => void rerunRun(r.id)}>
-                      Re-run
-                    </button>
-                  </div>
-                </article>
-              ))
-            )}
-          </div>
-        </section>
       ) : tab === "tracker" ? (
         <section className="card">
-          <h2>Application tracker</h2>
+          <h2>Applications</h2>
           <p className="lede">Every packet the agent prepared or sent, newest first.</p>
+          <div className="tabs small" style={{ marginBottom: 16 }}>
+            <button
+              className={trackerFilter === "needs_review" ? "active" : ""}
+              onClick={() => setTrackerFilter("needs_review")}
+            >
+              Needs review ({review.length})
+            </button>
+            <button
+              className={trackerFilter === "all" ? "active" : ""}
+              onClick={() => setTrackerFilter("all")}
+            >
+              All
+            </button>
+            <button
+              className={trackerFilter === "seen" ? "active" : ""}
+              onClick={() => setTrackerFilter("seen")}
+            >
+              Previously applied
+            </button>
+          </div>
+          {trackerFilter === "needs_review" ? (
+            <>
+              <p className="lede">
+                Nothing here has been sent. Edit a letter, approve it to send, or skip it.
+              </p>
+              <div className="jobs">
+                {review.length === 0 ? (
+                  <p className="empty">No applications waiting for review.</p>
+                ) : (
+                  review.map((app) => reviewCard(app))
+                )}
+              </div>
+            </>
+          ) : trackerFilter === "seen" ? (
+            <>
+              <p className="lede">
+                Jobs already applied to or prepared in earlier runs. These are skipped automatically
+                by future runs.
+              </p>
+              <div className="jobs">
+                {seen.length === 0 ? (
+                  <p className="empty">Nothing applied to yet.</p>
+                ) : (
+                  seen.map((job) => (
+                    <article className="job" key={job.id}>
+                      <header>
+                        <h3>
+                          {job.title} · {job.company}
+                        </h3>
+                        <span className={`status ${job.status}`}>{job.status}</span>
+                      </header>
+                      <p className="meta">
+                        {job.created_at ? `First seen ${job.created_at.slice(0, 10)}` : ""}
+                      </p>
+                      {job.url ? (
+                        <a href={job.url} target="_blank" rel="noreferrer">
+                          Posting
+                        </a>
+                      ) : null}
+                    </article>
+                  ))
+                )}
+              </div>
+            </>
+          ) : (
           <div className="jobs">
-            {history.length === 0 ? (
+            {sortedHistory.length === 0 ? (
               <p className="empty">No applications yet.</p>
             ) : (
-              history.map((app) => {
+              sortedHistory.map((app) => {
                 const draft = trackerDrafts[app.id] ?? {
-                  stage: app.pipeline_stage || "applied",
+                  stage: app.pipeline_stage || "not_applied",
                   user_notes: app.user_notes || "",
                   follow_up_date: app.follow_up_date || "",
                 };
@@ -691,52 +861,79 @@ export default function App() {
                 );
               })
             )}
-          </div>
-        </section>
-      ) : tab === "review" ? (
-        <section className="card">
-          <h2>Review queue</h2>
-          <p className="lede">
-            Nothing here has been sent. Edit a letter, approve it to send, or skip it.
-          </p>
-          <div className="jobs">
-            {review.length === 0 ? (
-              <p className="empty">No applications waiting for review.</p>
-            ) : (
-              review.map((app) => reviewCard(app))
-            )}
-          </div>
-          <h2 style={{ marginTop: 24 }}>Previously applied</h2>
-          <p className="lede">
-            Jobs already applied to or prepared in earlier runs. These are skipped automatically
-            by future runs.
-          </p>
-          <div className="jobs">
-            {seen.length === 0 ? (
-              <p className="empty">Nothing applied to yet.</p>
-            ) : (
-              seen.map((job) => (
-                <article className="job" key={job.id}>
-                  <header>
-                    <h3>
-                      {job.title} · {job.company}
-                    </h3>
-                    <span className={`status ${job.status}`}>{job.status}</span>
-                  </header>
-                  <p className="meta">
-                    {job.created_at ? `First seen ${job.created_at.slice(0, 10)}` : ""}
-                  </p>
-                  {job.url ? (
-                    <a href={job.url} target="_blank" rel="noreferrer">
-                      Posting
-                    </a>
-                  ) : null}
-                </article>
-              ))
-            )}
-          </div>
+            </div>
+          )}
         </section>
       ) : null}
     </div>
   );
+}
+
+export default function Root() {
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [hosted, setHosted] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [summary, setSummary] = useState<PublicSummary | null>(null);
+  const [page, setPage] = useState<AuthPage>(() =>
+    window.location.pathname === "/verify-email"
+      ? "verify"
+      : window.location.pathname === "/reset-password"
+        ? "reset"
+        : "landing",
+  );
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const cfg = await fetch("/api/config").then((r) => r.json());
+        setHosted(Boolean(cfg?.hosted));
+      } catch {
+        /* config is best-effort */
+      }
+      try {
+        const res = await fetch("/api/auth/me");
+        if (res.ok) setUser((await res.json()) as AuthUser);
+      } catch {
+        /* signed out */
+      }
+      try {
+        const res = await fetch("/api/public/summary");
+        if (res.ok) setSummary((await res.json()) as PublicSummary);
+      } catch {
+        /* landing works without stats */
+      }
+      setLoading(false);
+    })();
+  }, []);
+
+  async function logout() {
+    await fetch("/api/auth/logout", { method: "POST" }).catch(() => null);
+    setUser(null);
+    setPage("landing");
+  }
+
+  if (loading) {
+    return (
+      <div className="app">
+        <p className="lede">Loading…</p>
+      </div>
+    );
+  }
+  // Email-link flows render even when a session exists: a signed-in user
+  // clicking the verification link still has to complete verification.
+  if (page === "verify") return <VerifyPage go={setPage} />;
+  if (page === "reset") return <ResetPage go={setPage} />;
+  if (user) {
+    return <Workspace user={user} hosted={hosted} onLogout={() => void logout()} />;
+  }
+  switch (page) {
+    case "login":
+      return <LoginPage go={setPage} onSignedIn={setUser} />;
+    case "register":
+      return <RegisterPage go={setPage} />;
+    case "forgot":
+      return <ForgotPage go={setPage} />;
+    default:
+      return <Landing summary={summary} go={setPage} />;
+  }
 }

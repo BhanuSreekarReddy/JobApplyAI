@@ -22,6 +22,18 @@ KNOWN_HEADING_RE = re.compile(
 )
 
 
+def split_name(name: str) -> tuple[str, str]:
+    """Split a full name into (first, last) on the first space: the first
+    token is the first name and the remainder is the last name. A
+    single-token name goes entirely to the first name."""
+    parts = (name or "").strip().split(None, 1)
+    if not parts:
+        return "", ""
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], parts[1].strip()
+
+
 def _summary(lines: list[str], name: str) -> str:
     """Prose from the top of the resume or its Summary/Profile section, skipping the name/contact header.
     This text goes into cover letters, so contact lines, headings, and other sections must not leak in."""
@@ -139,8 +151,11 @@ def heuristic_profile(text: str) -> dict[str, Any]:
     linkedin = LINKEDIN_RE.search(text)
     github = GITHUB_RE.search(text)
     summary = _summary(lines, name)
+    first_name, last_name = split_name(name)
     return {
         "name": name[:80],
+        "first_name": first_name[:80],
+        "last_name": last_name[:80],
         "email": emails[0] if emails else "",
         "phone": phones[0] if phones else "",
         "linkedin": linkedin.group(0) if linkedin else "",
@@ -176,6 +191,10 @@ def enhance_with_llm(profile: dict[str, Any], text: str) -> dict[str, Any]:
         )
         parsed = json.loads(resp.choices[0].message.content or "{}")
         merged = {**profile, **{k: v for k, v in parsed.items() if v}}
+        if parsed.get("name"):
+            # The LLM supplied a different full name; re-derive the split so
+            # it never goes stale against the heuristic split.
+            merged["first_name"], merged["last_name"] = split_name(str(merged["name"]))
         if isinstance(merged.get("skills"), list):
             merged["skills"] = [str(s) for s in merged["skills"][:24]]
         if isinstance(merged.get("titles"), list):

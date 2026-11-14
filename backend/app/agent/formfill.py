@@ -39,6 +39,63 @@ RULES: list[tuple[str, re.Pattern[str]]] = [
     ("location", re.compile(r"\b(location|city)\b|where are you (located|based)")),
 ]
 FULL_NAME_RE = re.compile(r"^(your |full |legal )?name\b")
+
+# Saved-answer categories. The filler never guesses answers to the questions
+# below (most are on the SENSITIVE_RE blocklist); it may fill them ONLY from
+# the user's saved answer bank (profile_answers), keyed by these canonical
+# keys. Free-form saved answers are keyed by their normalized question label
+# instead. EEO/demographic categories are a separate sensitivity class: they
+# are saved only when the user explicitly opts in per question.
+ANSWER_RULES: list[tuple[str, re.Pattern[str]]] = [
+    ("security_clearance", re.compile(r"security clearance|\bclearance\b")),
+    ("sponsorship", re.compile(r"sponsor")),
+    ("citizenship_status", re.compile(r"citizen")),
+    ("work_authorization", re.compile(r"authori[sz]|eligible to work|legally entitled to work|work permit")),
+    ("previously_interviewed", re.compile(r"interviewed|prior interview")),
+    ("previously_employed", re.compile(r"previously employed|previously worked|former employee|been employed by|ever worked (for|at|here)")),
+    ("how_heard", re.compile(r"hear about|how did you (hear|find|learn)|\breferr")),
+    ("salary_expectations", re.compile(r"salary|compensation|expected pay|pay expectation|desired pay")),
+    ("start_date", re.compile(r"start date|when can you start|earliest.{0,20}start|available to start|notice period")),
+    ("work_onsite", re.compile(r"on ?site|work in (the|our) office|in person at (the|our)")),
+    ("country", re.compile(r"\bcountry\b")),
+    ("gender", re.compile(r"gender|\bsex\b")),
+    ("race_ethnicity", re.compile(r"\brace\b|ethnic|hispanic|latin[oax]")),
+    ("veteran_status", re.compile(r"veteran")),
+    ("disability_status", re.compile(r"disab")),
+    ("pronouns", re.compile(r"pronoun")),
+]
+EEO_ANSWER_KEYS = {"gender", "race_ethnicity", "veteran_status", "disability_status", "pronouns"}
+EEO_LABEL_RE = re.compile(
+    r"gender|\bsex\b|\brace\b|ethnic|hispanic|latin[oax]|veteran|disab|pronoun|orientation|transgender"
+)
+# One-time codes and human checks must never be captured into the answer bank.
+CODE_LABEL_RE = re.compile(
+    r"security code|verification code|one[- ]?time|passcode|\botp\b|captcha|human check|access code"
+)
+
+
+def _classify_answer(f: dict[str, Any]) -> str | None:
+    """Canonical answer-bank key for a field, or None. Unlike _classify this
+    deliberately matches blocklisted questions — it only ever *labels* a
+    field; the value always comes from the user's saved answers."""
+    label = f.get("label") or ""
+    if not label and not f.get("name"):
+        return None
+    hay = _norm(label, f.get("placeholder") or "", f.get("name") or "", f.get("idAttr") or "")
+    if not hay:
+        return None
+    for key, rx in ANSWER_RULES:
+        if rx.search(hay):
+            return key
+    return None
+
+
+def answer_is_sensitive(key: str, question: str = "") -> bool:
+    """EEO/demographic answers are a separate sensitivity class: offered for
+    saving only as an explicit per-question opt-in."""
+    if key in EEO_ANSWER_KEYS:
+        return True
+    return bool(question and EEO_LABEL_RE.search(_norm(question)))
 FULL_NAME_ATTRS = {"name", "full name", "fullname", "candidate name", "your name"}
 TEXT_TYPES = {"text", "email", "tel", "url", "number", "textarea", ""}
 CONTACT_KINDS = {"email", "first_name", "last_name", "full_name", "phone"}
@@ -208,6 +265,124 @@ SCAN_JS = r"""
     fields.push(field);
   }
   return { fields, next: id, hasPassword };
+}
+"""
+
+# Like SCAN_JS, but returns the CURRENT value of every field — used after the
+# user has answered questions by hand in a streamed session, to offer those
+# answers for saving into their profile answer bank. Password, file, hidden
+# and button inputs are never read. Radio/checkbox groups report the checked
+# member's label text.
+CAPTURE_JS = r"""
+() => {
+  const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  const ownText = (root) => {
+    const parts = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let n;
+    while ((n = walker.nextNode())) {
+      const parent = n.parentElement;
+      if (parent && parent.closest('select,textarea,option,script,style,button')) continue;
+      if (parent && parent.checkVisibility && !parent.checkVisibility()) continue;
+      parts.push(n.nodeValue);
+    }
+    return clean(parts.join(' ')).slice(0, 300);
+  };
+  const isVisible = (el) => {
+    if (!el) return false;
+    const r = el.getBoundingClientRect();
+    const s = getComputedStyle(el);
+    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+  };
+  const CONTROLS = 'input:not([type=hidden]),textarea,select';
+  const labelFor = (el) => {
+    const ids = el.getAttribute('aria-labelledby');
+    if (ids) {
+      const t = clean(ids.split(/\s+/).map((i) => { const e = document.getElementById(i); return e ? e.textContent : ''; }).join(' '));
+      if (t) return t;
+    }
+    if (el.labels && el.labels.length) {
+      const t = clean(Array.from(el.labels).map(ownText).join(' '));
+      if (t) return t;
+    }
+    const aria = clean(el.getAttribute('aria-label'));
+    if (aria) return aria;
+    let node = el.parentElement;
+    for (let depth = 0; node && depth < 5; depth++, node = node.parentElement) {
+      if (node.querySelectorAll(CONTROLS).length > 1) break;
+      const t = ownText(node);
+      if (t) return t;
+    }
+    return '';
+  };
+  const memberLabel = (el) => {
+    if (el.labels && el.labels.length) return clean(Array.from(el.labels).map(ownText).join(' '));
+    const lab = el.closest('label');
+    return lab ? ownText(lab) : '';
+  };
+  const groupLabel = (el) => {
+    const fs = el.closest('fieldset');
+    const legend = fs && fs.querySelector('legend');
+    if (legend) return clean(legend.textContent);
+    const rg = el.closest('[role=radiogroup],[role=group]');
+    if (rg) return clean(rg.getAttribute('aria-label')) || ownText(rg).slice(0, 160);
+    if (el.name) {
+      const members = Array.from(document.querySelectorAll(`input[name="${CSS.escape(el.name)}"]`));
+      const options = members.flatMap((m) => Array.from(m.labels || []).map(ownText)).filter(Boolean);
+      let node = el.parentElement;
+      for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
+        if (Array.from(node.querySelectorAll(CONTROLS)).some((c) => !members.includes(c))) break;
+        if (!members.every((m) => node.contains(m))) continue;
+        let t = ownText(node);
+        options.forEach((o) => { t = t.split(o).join(' '); });
+        t = clean(t);
+        if (t) return t.slice(0, 160);
+      }
+    }
+    return labelFor(el);
+  };
+
+  const fields = [];
+  const groups = new Set();
+  for (const el of document.querySelectorAll('input, textarea, select')) {
+    const tag = el.tagName.toLowerCase();
+    const type = tag === 'input' ? (el.getAttribute('type') || 'text').toLowerCase() : tag;
+    if (['hidden', 'submit', 'button', 'reset', 'image', 'password', 'search', 'file'].includes(type)) continue;
+    if (el.disabled) continue;
+    const isChoice = type === 'radio' || type === 'checkbox';
+    if (isChoice) {
+      const key = type + ':' + (el.name || groupLabel(el));
+      if (groups.has(key)) continue;
+      groups.add(key);
+      const members = el.name
+        ? Array.from(document.querySelectorAll(`input[name="${CSS.escape(el.name)}"]`))
+        : [el];
+      const checked = members.find((m) => m.checked);
+      fields.push({
+        label: clean(groupLabel(el).replace(/[*✱]/g, '')),
+        type, tag,
+        name: el.getAttribute('name') || '',
+        value: checked ? memberLabel(checked) : '',
+      });
+      continue;
+    }
+    if (el.readOnly || !isVisible(el)) continue;
+    let value = '';
+    if (tag === 'select') {
+      const opt = el.options[el.selectedIndex];
+      const text = opt ? clean(opt.text) : '';
+      value = el.selectedIndex === 0 && /^(select|choose|please|--|none)/i.test(text) ? '' : text;
+    } else {
+      value = clean(el.value);
+    }
+    fields.push({
+      label: clean(labelFor(el).replace(/[*✱]/g, '')),
+      type, tag,
+      name: el.getAttribute('name') || '',
+      value,
+    });
+  }
+  return fields;
 }
 """
 
@@ -404,6 +579,7 @@ async def fill_application(
     resume_path: str,
     location: str,
     packet_key: str,
+    answers: dict[str, str] | None = None,
 ) -> dict[str, str]:
     url = (job.get("apply_url") or "").strip()
     if not url.startswith(("http://", "https://")):
@@ -417,7 +593,7 @@ async def fill_application(
             "notes": "Browser pre-fill unavailable: run `pip install playwright && playwright install chromium`.",
         }
     files = _packet_files(profile, cover, resume_path, packet_key)
-    values = _values(profile, location, cover, files)
+    values = _values(profile, location, cover, files, answers)
     try:
         return await _worker.call(asyncio.wait_for(_fill(url, values), FILL_TIMEOUT_S))
     except Exception as exc:
@@ -435,7 +611,17 @@ async def _fill(url: str, values: dict[str, Any]) -> dict[str, str]:
     page = blank[0] if blank else await ctx.new_page()
     await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
     await _settle(page)
+    result = await _fill_open_page(page, values)
+    result.pop("_page", None)
+    return result
 
+
+async def _fill_open_page(page: Any, values: dict[str, Any]) -> dict[str, Any]:
+    """Fill the application form on an already-open page. Shared by the local
+    browser flow and by streamed pre-fill sessions, which supply their own
+    page in an ephemeral context. Returns the usual status/channel/notes
+    plus `filled` and `needs_attention` field labels and the active `_page`
+    (clicking through an Apply link can move to a different page)."""
     fields = await _scan(page)
     tried: set[str] = set()
     for _ in range(4):
@@ -457,7 +643,7 @@ async def _fill(url: str, values: dict[str, Any]) -> dict[str, str]:
             note += f" with the subject “{subject}”." if subject else "."
             await _banner(page, f"JobApply Agent: {note}")
             await page.bring_to_front()
-            return {"status": "prepared", "channel": "mailto", "notes": note, "apply_email": address, "email_subject": subject}
+            return {"status": "prepared", "channel": "mailto", "notes": note, "apply_email": address, "email_subject": subject, "filled": [], "needs_attention": [], "_page": page}
         note = "Couldn't find an application form at the apply URL."
         if needs_login:
             note = (
@@ -466,26 +652,30 @@ async def _fill(url: str, values: dict[str, Any]) -> dict[str, str]:
             )
         await _banner(page, f"JobApply Agent: {note}")
         await page.bring_to_front()
-        return {"status": "prepared", "channel": "ats_link", "notes": note + " Packet is ready."}
+        return {"status": "prepared", "channel": "ats_link", "notes": note + " Packet is ready.", "filled": [], "needs_attention": [], "_page": page}
 
     done: list[dict[str, Any]] = []
     todo: list[dict[str, Any]] = []
     used: set[str] = set()
+    filled_values: dict[str, str] = {}
     for f in _application_form(fields):
         kind = f["kind"]
         if kind in {"resume", "cover_file"} and kind in used:
             kind = None
-        value = values.get(kind) if kind else None
+        fill_kind, value = _planned_value(f, values, kind)
         ok = False
         attempted = bool(value) and not (f["filled"] and f["type"] != "file")
         if attempted:
             try:
-                ok = await _fill_field(f, kind, value)
+                ok = await _fill_field(f, fill_kind, value)
             except Exception:
                 ok = False
         if ok:
-            used.add(kind)
+            if kind:
+                used.add(kind)
             done.append(f)
+            if f.get("label"):
+                filled_values[_norm(f["label"])] = str(value)
         elif attempted or (f["required"] and not f["filled"]):
             todo.append(f)
 
@@ -514,6 +704,10 @@ async def _fill(url: str, values: dict[str, Any]) -> dict[str, str]:
         "status": "filled" if done else "prepared",
         "channel": "browser",
         "notes": " · ".join(lines),
+        "filled": list(dict.fromkeys(_display(f) for f in done)),
+        "needs_attention": list(dict.fromkeys(_display(f) for f in todo)),
+        "filled_values": filled_values,
+        "_page": page,
     }
 
 
@@ -551,10 +745,81 @@ async def _scan(page: Any) -> list[dict[str, Any]]:
         for f in res["fields"]:
             f["frame"] = frame
             f["kind"] = _classify(f)
+            f["answer_key"] = _classify_answer(f)
             fields.append(f)
         if res.get("hasPassword"):
             fields.append({"_password": True, "frame": frame})
     return fields
+
+
+async def _scan_form_values(page: Any) -> list[dict[str, Any]]:
+    """Current field values on an open page (CAPTURE_JS per frame). Used to
+    offer the answers a user typed into a streamed session for saving."""
+    fields: list[dict[str, Any]] = []
+    for frame in page.frames:
+        if CAPTCHA_RE.search(frame.url or ""):
+            continue
+        try:
+            fields.extend(await frame.evaluate(CAPTURE_JS))
+        except Exception:
+            continue
+    return fields
+
+
+def answer_candidates(
+    scanned: list[dict[str, Any]], agent_filled: dict[str, str]
+) -> list[dict[str, Any]]:
+    """Diff a form's current values against what the agent filled, and return
+    the values the USER supplied as save-for-next-time candidates.
+
+    Excluded: empty values, password/file/hidden fields (the capture scan
+    never returns them, but the filter is enforced here too), one-time-code /
+    verification / captcha fields, and fields the resume profile already
+    covers (they classify to a resume kind). A value identical to what the
+    agent filled for that label is the agent's, not the user's, and is
+    skipped. EEO/demographic candidates are flagged `sensitive` so the UI
+    can leave them unchecked by default.
+    """
+    out: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for f in scanned:
+        label = (f.get("label") or "").strip()
+        value = (f.get("value") or "").strip()
+        if not label or not value:
+            continue
+        if f.get("type") in {"password", "file", "hidden"} or f.get("tag") == "file":
+            continue
+        hay = _norm(label, f.get("name") or "")
+        if CODE_LABEL_RE.search(hay):
+            continue
+        probe = {
+            "label": label,
+            "type": f.get("type") or "text",
+            "tag": f.get("tag") or "input",
+            "name": f.get("name") or "",
+            "placeholder": "",
+            "idAttr": "",
+            "autocomplete": "",
+            "options": [],
+            "combobox": False,
+        }
+        if _classify(probe):
+            continue  # resume basics live on the profile, not in the answer bank
+        if agent_filled.get(_norm(label)) == value:
+            continue  # the agent put this value there
+        key = _classify_answer(probe) or _norm(label)
+        if not key or key in seen_keys:
+            continue
+        seen_keys.add(key)
+        out.append(
+            {
+                "key": key,
+                "question": label,
+                "answer": value,
+                "sensitive": answer_is_sensitive(key, label),
+            }
+        )
+    return out
 
 
 def _form_weight(group: list[dict[str, Any]]) -> int:
@@ -669,13 +934,39 @@ def _classify(f: dict[str, Any]) -> str | None:
     return kind
 
 
+def _planned_value(
+    f: dict[str, Any], values: dict[str, Any], kind: str | None = None
+) -> tuple[str | None, Any]:
+    """The (key, value) the filler will use for a field. Resume-derived kinds
+    win; otherwise fall back to the saved answer bank — by the field's
+    canonical answer key first, then by its normalized label (free-form saved
+    answers). This is the ONLY path by which a blocklisted field can receive
+    a value: a saved answer the user stored on their profile."""
+    if kind is None:
+        kind = f.get("kind")
+    value = values.get(kind) if kind else None
+    if value:
+        return kind, value
+    answer_key = f.get("answer_key")
+    if answer_key and values.get(answer_key):
+        return answer_key, values[answer_key]
+    label_key = _norm(f.get("label") or "")
+    if label_key and values.get(label_key):
+        return label_key, values[label_key]
+    return kind, None
+
+
 async def _fill_field(f: dict[str, Any], kind: str, value: Any) -> bool:
     loc = f["frame"].locator(f'[{ATTR}="{f["id"]}"]')
     if f["type"] == "file":
         await loc.set_input_files(str(value), timeout=10_000)
         return True
     if f["tag"] == "select":
-        option = _pick_years_option(f["options"], int(value))
+        option = (
+            _pick_years_option(f["options"], int(value))
+            if kind == "years"
+            else _pick_option_by_text(f["options"], str(value))
+        )
         if not option:
             return False
         await loc.select_option(label=option, timeout=5_000)
@@ -797,6 +1088,27 @@ async def _visible_captcha(page: Any) -> bool:
     return False
 
 
+def _pick_option_by_text(options: list[str], answer: str) -> str | None:
+    """Match a saved answer against a <select>'s option texts: exact match
+    first, then prefix, then containment. Placeholder prompts are ignored."""
+    want = _norm(answer)
+    if not want:
+        return None
+    usable = [o for o in options if _norm(o) and not re.match(r"^(select|choose|please|--|—)", _norm(o))]
+    for opt in usable:
+        if _norm(opt) == want:
+            return opt
+    for opt in usable:
+        n = _norm(opt)
+        if n.startswith(want) or want.startswith(n):
+            return opt
+    for opt in usable:
+        n = _norm(opt)
+        if want in n or n in want:
+            return opt
+    return None
+
+
 def _pick_years_option(options: list[str], years: int) -> str | None:
     for opt in options:
         nums = [int(n) for n in re.findall(r"\d+", opt)]
@@ -834,16 +1146,32 @@ def _url(value: str | None) -> str:
     return value
 
 
-def _values(profile: dict[str, Any], location: str, cover: str, files: dict[str, Path]) -> dict[str, Any]:
+def _values(
+    profile: dict[str, Any],
+    location: str,
+    cover: str,
+    files: dict[str, Path],
+    answers: dict[str, str] | None = None,
+) -> dict[str, Any]:
     name = (profile.get("name") or "").strip()
-    parts = name.split()
+    first_name = (profile.get("first_name") or "").strip()
+    last_name = (profile.get("last_name") or "").strip()
+    if first_name or last_name:
+        # The stored split wins; a single full-name field gets the stored
+        # full name, or the parts recombined when only they are known.
+        if not name:
+            name = " ".join(p for p in (first_name, last_name) if p)
+    else:
+        parts = name.split()
+        first_name = parts[0] if parts else ""
+        last_name = " ".join(p for p in parts[1:] if not re.fullmatch(r"[A-Za-z]\.?", p))
     github = _url(profile.get("github"))
     years = profile.get("years_experience")
-    return {
+    values: dict[str, Any] = {
         "email": profile.get("email") or "",
         "full_name": name,
-        "first_name": parts[0] if parts else "",
-        "last_name": " ".join(p for p in parts[1:] if not re.fullmatch(r"[A-Za-z]\.?", p)),
+        "first_name": first_name,
+        "last_name": last_name,
         "phone": profile.get("phone") or "",
         "linkedin": _url(profile.get("linkedin")),
         "github": github,
@@ -854,6 +1182,13 @@ def _values(profile: dict[str, Any], location: str, cover: str, files: dict[str,
         "resume": files.get("resume"),
         "cover_file": files.get("cover_file"),
     }
+    # Saved answers join the same value map, keyed by canonical answer key or
+    # normalized question label. Resume kinds are already set above and are
+    # never overridden by an answer-bank entry.
+    for key, answer in (answers or {}).items():
+        if key and answer and key not in values:
+            values[key] = answer
+    return values
 
 
 def _packet_files(profile: dict[str, Any], cover: str, resume_path: str, packet_key: str) -> dict[str, Path]:
@@ -863,7 +1198,7 @@ def _packet_files(profile: dict[str, Any], cover: str, resume_path: str, packet_
     out.mkdir(parents=True, exist_ok=True)
     files: dict[str, Path] = {}
     src = Path(resume_path)
-    if src.exists():
+    if src.is_file():
         dest = out / f"{stem}_Resume{src.suffix.lower()}"
         dest.write_bytes(src.read_bytes())
         files["resume"] = dest
