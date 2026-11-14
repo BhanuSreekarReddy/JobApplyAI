@@ -30,8 +30,8 @@ type SessionInfo = {
  * clipboard. Copy/paste inside the streamed page never leaves its
  * browser and is fully native. Only plain text crosses between the two
  * machines. If a browser won't play along, the server degrades paste to
- * direct text insertion and copy to reading the selection, and the
- * fallback box/button under the form covers the rest.
+ * direct text insertion and copy to reading the selection — automatically;
+ * there are no clipboard controls in the UI by design.
  */
 export default function PrefillView({
   sessionId,
@@ -53,8 +53,6 @@ export default function PrefillView({
   const [pendingClose, setPendingClose] = useState(false);
   const [answersBusy, setAnswersBusy] = useState(false);
   const [answersNote, setAnswersNote] = useState("");
-  const [pasteText, setPasteText] = useState("");
-  const [copiedText, setCopiedText] = useState("");
   const [clipNote, setClipNote] = useState("");
 
   useEffect(() => {
@@ -188,8 +186,8 @@ export default function PrefillView({
   // and sends its clipboard back; put the text on this machine's
   // clipboard. Try the async clipboard API first, then a temporary
   // textarea + execCommand('copy') (still within reach of the copy
-  // keystroke's user gesture), and only then show the text in a box the
-  // user can copy with a real keystroke.
+  // keystroke's user gesture). If the browser blocks both, the status
+  // note says so — there is deliberately no manual-copy UI.
   async function receiveCopiedText(text: string) {
     if (!text) {
       setClipNote("Nothing is selected in the form — select text there first, then copy.");
@@ -197,7 +195,6 @@ export default function PrefillView({
     }
     try {
       await navigator.clipboard.writeText(text);
-      setCopiedText("");
       setClipNote("Copied from the form to your clipboard.");
       return;
     } catch {
@@ -213,29 +210,18 @@ export default function PrefillView({
       const ok = document.execCommand("copy");
       area.remove();
       if (ok) {
-        setCopiedText("");
         setClipNote("Copied from the form to your clipboard.");
         return;
       }
     } catch {
-      /* fall through to the manual box */
+      /* fall through to the status note */
     }
-    setCopiedText(text);
-    setClipNote("Your browser blocked automatic copying — the text is in the box below, copy it from there.");
+    setClipNote("Your browser blocked automatic copying, so the selected text couldn't be copied.");
   }
 
   function requestCopy() {
     setClipNote("");
     send({ type: "copy" });
-  }
-
-  // Fallback paste-in (the box below): the server inserts the text
-  // directly at the form's focus. No paste event fires in the page —
-  // which is why the keyboard path above is the primary one.
-  function pasteIntoForm(text: string) {
-    if (!text) return;
-    send({ type: "insert-text", text });
-    setClipNote("Pasted into the form at the cursor.");
   }
 
   async function fetchCandidates(): Promise<AnswerCandidate[] | null> {
@@ -458,43 +444,6 @@ export default function PrefillView({
         Ctrl+C / Cmd+C copies the text you selected in the form to your own clipboard, and
         Ctrl+V / Cmd+V pastes your clipboard into the focused field — no buttons needed.
       </p>
-      <details style={{ marginBottom: 12 }}>
-        <summary className="meta" style={{ cursor: "pointer" }}>
-          Clipboard fallback — only if the keyboard shortcuts don't work in your browser
-        </summary>
-        <div className="row" style={{ marginTop: 8 }}>
-          <input
-            type="text"
-            placeholder="Text to paste into the form…"
-            value={pasteText}
-            onChange={(e) => setPasteText(e.target.value)}
-            style={{ flex: 1 }}
-          />
-          <button
-            className="ghost"
-            disabled={streamState !== "live" || !pasteText}
-            onClick={() => {
-              pasteIntoForm(pasteText);
-              setPasteText("");
-            }}
-          >
-            Paste into form
-          </button>
-          <button className="ghost" disabled={streamState !== "live"} onClick={requestCopy}>
-            Copy selected text
-          </button>
-        </div>
-      </details>
-      {copiedText ? (
-        <input
-          type="text"
-          readOnly
-          value={copiedText}
-          onFocus={(e) => e.target.select()}
-          style={{ width: "100%", marginBottom: 12 }}
-          aria-label="Text copied from the form"
-        />
-      ) : null}
       {clipNote ? <p className="meta">{clipNote}</p> : null}
       {candidates ? (
         <>
