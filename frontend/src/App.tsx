@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useState } from "react";
+import AnswerCandidatesPanel, { AnswerCandidate } from "./AnswerCandidates";
 import Companies from "./Companies";
 import JobLink from "./JobLink";
 import PrefillView from "./Prefill";
@@ -113,6 +114,17 @@ function Workspace({
   const [trackerFilter, setTrackerFilter] = useState<"all" | "needs_review" | "seen">("all");
   const [menuOpen, setMenuOpen] = useState(false);
   const [prefillSession, setPrefillSession] = useState<string | null>(null);
+  const [localCapture, setLocalCapture] = useState<{
+    appId: number;
+    title: string;
+    candidates: AnswerCandidate[];
+  } | null>(null);
+  const [pendingCand, setPendingCand] = useState<{
+    session_id: string;
+    candidates: AnswerCandidate[];
+  } | null>(null);
+  const [captureBusy, setCaptureBusy] = useState(false);
+  const [captureNote, setCaptureNote] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [locations, setLocations] = useState("San Francisco, CA, Remote");
   const [email, setEmail] = useState("");
@@ -200,6 +212,93 @@ function Workspace({
     }
   }
 
+  // Local mode: scan back the tab a fill left open and offer the answers
+  // the user typed themselves for saving into the answer bank.
+  async function captureAnswers(app: Application) {
+    setWorking(app.id);
+    try {
+      const res = await fetch(`/api/applications/${app.id}/answer-candidates`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { detail?: string } | null;
+        throw new Error(body?.detail || `Request failed (${res.status})`);
+      }
+      const data = (await res.json()) as { candidates: AnswerCandidate[] };
+      setTrackerFilter("all");
+      await loadTracker();
+      setLocalCapture({
+        appId: app.id,
+        title: `${app.title} · ${app.company}`,
+        candidates: data.candidates,
+      });
+    } catch (err) {
+      replaceApp({ ...app, notes: err instanceof Error ? err.message : "Request failed" });
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  async function saveLocalCapture(chosen: AnswerCandidate[]) {
+    setCaptureBusy(true);
+    try {
+      const res = await fetch("/api/profile/answers", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: chosen.map(({ key, question, answer }) => ({ key, question, answer })),
+        }),
+      });
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      setLocalCapture(null);
+      setCaptureNote(
+        chosen.length
+          ? `Saved ${chosen.length} answer(s) to your profile — future applications will reuse them.`
+          : "Nothing was saved.",
+      );
+    } catch {
+      setCaptureNote("Saving failed — your answers are still on the form, nothing was lost.");
+    } finally {
+      setCaptureBusy(false);
+    }
+  }
+
+  async function savePendingCand(chosen: AnswerCandidate[]) {
+    if (!pendingCand) return;
+    setCaptureBusy(true);
+    try {
+      const res = await fetch(`/api/prefill-sessions/${pendingCand.session_id}/save-answers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          answers: chosen.map(({ key, question, answer }) => ({ key, question, answer })),
+        }),
+      });
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      setPendingCand(null);
+      setCaptureNote(
+        chosen.length
+          ? `Saved ${chosen.length} answer(s) to your profile — future applications will reuse them.`
+          : "Nothing was saved.",
+      );
+    } catch {
+      setCaptureNote("Saving failed — the answers are still listed above, try again.");
+    } finally {
+      setCaptureBusy(false);
+    }
+  }
+
+  async function dismissPendingCand() {
+    if (!pendingCand) return;
+    try {
+      await fetch(`/api/prefill-sessions/${pendingCand.session_id}/dismiss-candidates`, {
+        method: "POST",
+      });
+    } finally {
+      setPendingCand(null);
+    }
+  }
+
   function appButtons(app: Application) {
     if (app.status === "applied") return null;
     if (app.status === "pending_review")
@@ -229,6 +328,11 @@ function Workspace({
         <button className="ghost" disabled={working !== null} onClick={() => void appAction(app, "submitted")}>
           Mark submitted
         </button>
+        {!hosted && app.apply_url ? (
+          <button className="ghost" disabled={working !== null} onClick={() => void captureAnswers(app)}>
+            {working === app.id ? "Reading form…" : "Save answers from form"}
+          </button>
+        ) : null}
       </>
     );
   }
@@ -328,6 +432,21 @@ function Workspace({
     const seenRows = await fetch("/api/seen").then((r) => r.json());
     setSeen(seenRows);
     await refreshReview();
+    if (hosted) {
+      // A streamed session that ended before its answers could be
+      // reviewed (stream drop, idle timeout) leaves them pending —
+      // surface them here for confirmation.
+      try {
+        const pending = await fetch("/api/prefill-sessions/pending-candidates").then((r) =>
+          r.ok ? r.json() : null,
+        );
+        if (pending && pending.session_id && pending.candidates?.length) {
+          setPendingCand({ session_id: pending.session_id, candidates: pending.candidates });
+        }
+      } catch {
+        /* pending answers are best-effort */
+      }
+    }
   }
 
   async function saveTracker(id: number) {
@@ -363,12 +482,33 @@ function Workspace({
 
   async function approveApp(id: number) {
     setWorking(id);
+    let updated: Application | null = null;
     try {
       const res = await fetch(`/api/applications/${id}/approve`, { method: "POST" });
-      if (res.ok) replaceApp(await res.json());
+      if (res.ok) updated = (await res.json()) as Application;
     } finally {
       setWorking(null);
-      void refreshReview();
+    }
+    void refreshReview();
+    if (updated) {
+      replaceApp(updated);
+      await goToForm(updated);
+    }
+  }
+
+  // After approval, take the user straight to the live application form,
+  // in the Applications tab: a streamed session in hosted mode, or the
+  // local fill when the approval itself did not already run one. An
+  // application that was emailed (status "applied") has no form to open,
+  // and a packet without an apply URL stays with the current behavior.
+  async function goToForm(app: Application) {
+    if (!app.apply_url || app.status === "applied") return;
+    setTrackerFilter("all");
+    await loadTracker();
+    if (hosted) {
+      await startPrefill(app);
+    } else if (app.status === "prepared") {
+      await appAction(app, "fill");
     }
   }
 
@@ -578,15 +718,24 @@ function Workspace({
               Allow approved applications to be emailed automatically (every application still
               needs your approval first; otherwise approvals stay as prepared packets)
             </label>
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={browserFill}
-                onChange={(e) => setBrowserFill(e.target.checked)}
-              />
-              Pre-fill employer application forms in a browser window. Nothing is submitted: you review
-              each tab, answer the highlighted questions, and click Submit yourself.
-            </label>
+            {hosted ? (
+              <p className="lede">
+                Pre-fill works per application here: each prepared application gets a “Fill form in
+                browser” button, which opens the employer's form already filled in a streamed
+                session. Nothing is ever submitted for you — you review each tab and click Submit
+                yourself.
+              </p>
+            ) : (
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={browserFill}
+                  onChange={(e) => setBrowserFill(e.target.checked)}
+                />
+                Pre-fill employer application forms in a browser window. Nothing is submitted: you review
+                each tab, answer the highlighted questions, and click Submit yourself.
+              </label>
+            )}
             <button className="primary" disabled={busy || !file}>
               {busy ? "Agent running…" : "Run agent"}
             </button>
@@ -722,6 +871,33 @@ function Workspace({
         <section className="card">
           <h2>Applications</h2>
           <p className="lede">Every packet the agent prepared or sent, newest first.</p>
+          {pendingCand ? (
+            <div style={{ marginBottom: 16 }}>
+              <h3>Unsaved answers from a pre-fill session</h3>
+              <p className="meta">
+                That session ended before you could save the answers you typed. Confirm which
+                ones to keep — they are not in your profile yet.
+              </p>
+              <AnswerCandidatesPanel
+                candidates={pendingCand.candidates}
+                busy={captureBusy}
+                onSave={(chosen) => void savePendingCand(chosen)}
+                onDismiss={() => void dismissPendingCand()}
+              />
+            </div>
+          ) : null}
+          {localCapture ? (
+            <div style={{ marginBottom: 16 }}>
+              <h3>Save answers from {localCapture.title}</h3>
+              <AnswerCandidatesPanel
+                candidates={localCapture.candidates}
+                busy={captureBusy}
+                onSave={(chosen) => void saveLocalCapture(chosen)}
+                onDismiss={() => setLocalCapture(null)}
+              />
+            </div>
+          ) : null}
+          {captureNote ? <p className="notice ok">{captureNote}</p> : null}
           <div className="tabs small" style={{ marginBottom: 16 }}>
             <button
               className={trackerFilter === "needs_review" ? "active" : ""}

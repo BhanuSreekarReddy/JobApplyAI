@@ -169,6 +169,21 @@ SCAN_JS = r"""
     const s = getComputedStyle(el);
     return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
   };
+  const memberLabel = (el) => {
+    if (el.labels && el.labels.length) return clean(Array.from(el.labels).map(ownText).join(' '));
+    const lab = el.closest('label');
+    return lab ? ownText(lab) : '';
+  };
+  const groupOptions = (el, type) => {
+    // Every member of the group (same name + form), not just the ones the
+    // scan loop reaches: a member can be skipped above for being disabled
+    // or visually hidden while its option text still matters for matching.
+    const members = el.name
+      ? Array.from(document.querySelectorAll(`input[name="${CSS.escape(el.name)}"]`))
+          .filter((m) => (m.getAttribute('type') || 'text').toLowerCase() === type && m.form === el.form)
+      : [el];
+    return members.map(memberLabel).filter(Boolean).slice(0, 40);
+  };
   const CONTROLS = 'input:not([type=hidden]),textarea,select';
   const labelFor = (el) => {
     const ids = el.getAttribute('aria-labelledby');
@@ -257,7 +272,9 @@ SCAN_JS = r"""
         : isChoice ? el.checked
         : tag === 'select' ? el.selectedIndex > 0 || (el.selectedIndex === 0 && clean(el.value) !== '' && !/^(select|choose|please|--|none)/i.test(clean(el.options[0].text)))
         : clean(el.value) !== '',
-      options: tag === 'select' ? Array.from(el.options).map((o) => clean(o.text)).slice(0, 80) : [],
+      options: tag === 'select' ? Array.from(el.options).map((o) => clean(o.text)).slice(0, 80)
+        : isChoice ? groupOptions(el, type)
+        : [],
       combobox: el.getAttribute('role') === 'combobox' || el.hasAttribute('aria-autocomplete') || el.hasAttribute('list'),
       form: el.form ? Array.from(document.forms).indexOf(el.form) : -1,
     };
@@ -427,6 +444,48 @@ FILLED_JS = r"""
 })
 """
 
+# Select one member of a radio group: the member whose label text is exactly
+# the requested option (the caller matched the option text already). Clicking
+# the member's <label> is preferred — it is what a user does, and custom-styled
+# radios often hide the input itself. Selecting an option is filling, never
+# submitting: a radio input cannot submit a form.
+RADIO_FILL_JS = r"""
+({ id, option }) => {
+  const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  const ownText = (root) => {
+    const parts = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let n;
+    while ((n = walker.nextNode())) {
+      const parent = n.parentElement;
+      if (parent && parent.closest('select,textarea,option,script,style,button')) continue;
+      if (parent && parent.checkVisibility && !parent.checkVisibility()) continue;
+      parts.push(n.nodeValue);
+    }
+    return clean(parts.join(' ')).slice(0, 300);
+  };
+  const memberLabel = (el) => {
+    if (el.labels && el.labels.length) return clean(Array.from(el.labels).map(ownText).join(' '));
+    const lab = el.closest('label');
+    return lab ? ownText(lab) : '';
+  };
+  const el = document.querySelector(`[data-jobapply-id="${id}"]`);
+  if (!el || el.type !== 'radio') return false;
+  const members = el.name
+    ? Array.from(document.querySelectorAll(`input[name="${CSS.escape(el.name)}"]`))
+        .filter((m) => m.type === 'radio' && m.form === el.form)
+    : [el];
+  const target = members.find((m) => clean(memberLabel(m)) === clean(option));
+  if (!target || target.disabled) return false;
+  if (!target.checked) {
+    const lab = (target.labels && target.labels[0]) || target.closest('label');
+    if (lab) lab.click();
+    if (!target.checked) target.click();
+  }
+  return target.checked === true;
+}
+"""
+
 BANNER_JS = r"""
 (message) => {
   document.getElementById('jobapply-banner')?.remove();
@@ -571,6 +630,38 @@ def shutdown_browser() -> None:
     _worker.shutdown()
 
 
+# Pages a local fill completed, keyed by packet key, with the values the
+# agent filled. The local browser keeps its tabs open after a fill, so the
+# answers the user then types by hand can be scanned back and offered for
+# saving into the answer bank — the same capture streamed sessions have.
+# Entries are replaced when the same packet is filled again.
+_filled_pages: dict[str, dict[str, Any]] = {}
+
+
+def _register_filled_page(packet_key: str, page: Any, filled_values: dict[str, str] | None) -> None:
+    if packet_key and page is not None:
+        _filled_pages[packet_key] = {"page": page, "filled_values": dict(filled_values or {})}
+
+
+def has_filled_page(packet_key: str) -> bool:
+    return packet_key in _filled_pages
+
+
+async def capture_local_candidates(packet_key: str) -> list[dict[str, Any]] | None:
+    """Answer-bank candidates from what the user typed into a locally
+    filled form after the agent finished. None when no live filled page
+    is registered for the packet (never filled, or the tab was closed)."""
+    entry = _filled_pages.get(packet_key)
+    if entry is None:
+        return None
+    try:
+        scanned = await _scan_form_values(entry["page"])
+    except Exception:
+        _filled_pages.pop(packet_key, None)
+        return None
+    return answer_candidates(scanned, entry["filled_values"])
+
+
 async def fill_application(
     *,
     profile: dict[str, Any],
@@ -595,7 +686,7 @@ async def fill_application(
     files = _packet_files(profile, cover, resume_path, packet_key)
     values = _values(profile, location, cover, files, answers)
     try:
-        return await _worker.call(asyncio.wait_for(_fill(url, values), FILL_TIMEOUT_S))
+        return await _worker.call(asyncio.wait_for(_fill(url, values, packet_key), FILL_TIMEOUT_S))
     except Exception as exc:
         reason = "timed out" if isinstance(exc, (asyncio.TimeoutError, TimeoutError)) else str(exc).splitlines()[0][:200]
         return {
@@ -605,14 +696,17 @@ async def fill_application(
         }
 
 
-async def _fill(url: str, values: dict[str, Any]) -> dict[str, str]:
+async def _fill(url: str, values: dict[str, Any], packet_key: str = "") -> dict[str, str]:
     ctx = await _worker.context()
     blank = [p for p in ctx.pages if p.url in ("about:blank", "chrome://newtab/")]
     page = blank[0] if blank else await ctx.new_page()
     await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
     await _settle(page)
     result = await _fill_open_page(page, values)
-    result.pop("_page", None)
+    active_page = result.pop("_page", None)
+    # Keep the filled tab reachable so the user's own answers on it can be
+    # captured for the answer bank later (see capture_local_candidates).
+    _register_filled_page(packet_key, active_page, result.get("filled_values"))
     return result
 
 
@@ -956,7 +1050,50 @@ def _planned_value(
     return kind, None
 
 
+def _radio_option(f: dict[str, Any], value: Any) -> str | None:
+    """The option text a saved answer selects in a radio group, or None.
+    Mirrors the <select> matching (exact, then prefix, then containment)
+    with one guard: the containment pass is skipped for very short texts.
+    Radio options are often two or three letters ("No", "Yes"), where a
+    substring match turns a different stored answer into a guess — "no" is
+    a substring of "prefer not to say", and selecting "No" for it would
+    answer the question wrongly. An answer that matches no option selects
+    nothing: the group is left untouched and highlighted for the user."""
+    want = _norm(str(value))
+    if not want:
+        return None
+    usable = [
+        o
+        for o in (f.get("options") or [])
+        if _norm(o) and not re.match(r"^(select|choose|please|--|—)", _norm(o))
+    ]
+    for opt in usable:
+        if _norm(opt) == want:
+            return opt
+    for opt in usable:
+        n = _norm(opt)
+        if n.startswith(want) or want.startswith(n):
+            return opt
+    for opt in usable:
+        n = _norm(opt)
+        if min(len(n), len(want)) >= 4 and (want in n or n in want):
+            return opt
+    return None
+
+
 async def _fill_field(f: dict[str, Any], kind: str, value: Any) -> bool:
+    if f["type"] == "radio":
+        # Radio groups are filled ONLY from the saved answer bank (the value
+        # arrives via _planned_value's answer-key/label fallback — _classify
+        # never maps them to a resume kind). Clicking the matching option is
+        # filling, not submitting.
+        option = _radio_option(f, value)
+        if not option:
+            return False
+        try:
+            return bool(await f["frame"].evaluate(RADIO_FILL_JS, {"id": f["id"], "option": option}))
+        except Exception:
+            return False
     loc = f["frame"].locator(f'[{ATTR}="{f["id"]}"]')
     if f["type"] == "file":
         await loc.set_input_files(str(value), timeout=10_000)

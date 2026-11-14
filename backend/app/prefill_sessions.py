@@ -7,6 +7,13 @@ a WebSocket (CDP screencast) and forwards their mouse/keyboard input back
 (CDP Input domain). The user reviews the filled form and clicks Submit
 themselves — nothing is ever submitted by the agent.
 
+Clipboard: a screencast shares no clipboard with the user's machine, so
+paste arrives as an explicit "insert-text" message (CDP Input.insertText
+at the page's focus) and copy is an explicit "copy-selection" message
+(the page's current selection is read back for the client to place on the
+user's real clipboard). There is no access to the server browser's own
+clipboard or to unselected page content.
+
 Hard rules:
 - The browser profile lives under data/prefill-sessions/<id>/ and is
   DELETED when the session closes. No cookies or logins persist server-side.
@@ -31,6 +38,7 @@ from pydantic import BaseModel
 
 from . import answers as profile_answers
 from . import auth
+from .profile_source import fill_profile
 from .agent import formfill
 from .agent.runner import primary_location
 from .agent.seen import advance_stage_on_submission, record_application_seen
@@ -80,6 +88,7 @@ def _payload(record: PrefillSessionRecord) -> dict[str, Any]:
         "status": record.status,
         "filled": json.loads(record.filled_json or "[]"),
         "needs_attention": json.loads(record.needs_attention_json or "[]"),
+        "pending_candidates": json.loads(record.pending_candidates_json or "[]"),
         "notes": record.notes,
         "created_at": record.created_at.isoformat() if record.created_at else None,
     }
@@ -92,10 +101,46 @@ def _owned_record(db, session_id: str, user_id: int) -> PrefillSessionRecord:
     return record
 
 
+async def _stash_pending_candidates(live: _Live) -> None:
+    """Last-chance answer capture before a session's browser is torn
+    down: scan the form and keep whatever the user typed (diffed against
+    what the agent filled) as PENDING candidates on the session record.
+    Runs for every close reason — an idle timeout or a dropped stream
+    must not silently throw away answers the user typed. Nothing is
+    written to the answer bank here; the user still confirms each item
+    before anything is saved."""
+    if live.page is None:
+        return
+    try:
+        scanned = await asyncio.wait_for(formfill._scan_form_values(live.page), timeout=10)
+        candidates = formfill.answer_candidates(scanned, live.filled_values)
+    except Exception:
+        return
+    if not candidates:
+        return
+    db = SessionLocal()
+    try:
+        # Answers already in the bank (e.g. saved moments ago from this
+        # same session) are not pending — don't offer them twice.
+        bank = profile_answers.answers_map(db, live.user_id)
+        candidates = [c for c in candidates if bank.get(c["key"]) != c["answer"]]
+        if not candidates:
+            return
+        record = db.get(PrefillSessionRecord, live.id)
+        if record is not None:
+            record.pending_candidates_json = json.dumps(candidates)
+            db.commit()
+    except Exception:
+        pass
+    finally:
+        db.close()
+
+
 async def _close_live(live: _Live, reason: str) -> None:
     if live.closed:
         return
     live.closed = True
+    await _stash_pending_candidates(live)
     try:
         if live.cdp is not None:
             try:
@@ -171,10 +216,9 @@ async def create_prefill_session(body: CreateSession, request: Request):
         if run is None:
             raise HTTPException(404, "Run not found")
         job = db.get(JobMatch, application.job_id) if application.job_id else None
-        try:
-            profile = json.loads(run.profile_json or "{}")
-        except json.JSONDecodeError:
-            profile = {}
+        # The user's saved profile wins over the run's snapshot, so edits
+        # made on the profile page reach this session's fill.
+        profile = fill_profile(db, user.id, run)
         cover = application.cover_letter or ""
         resume_path = run.resume_path or ""
         location = primary_location(run.locations)
@@ -272,6 +316,34 @@ async def create_prefill_session(body: CreateSession, request: Request):
     return payload
 
 
+@router.get("/api/prefill-sessions/pending-candidates")
+def pending_candidates(request: Request):
+    """The newest session that ended with unreviewed answer candidates
+    (stream drop, idle timeout, or a close before saving). The client
+    offers them for confirmation; nothing here is in the bank yet."""
+    user = auth.current_user(request)
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(PrefillSessionRecord)
+            .filter(PrefillSessionRecord.user_id == user.id)
+            .order_by(PrefillSessionRecord.created_at.desc())
+            .limit(10)
+            .all()
+        )
+        for record in rows:
+            candidates = json.loads(record.pending_candidates_json or "[]")
+            if candidates:
+                return {
+                    "session_id": record.id,
+                    "application_id": record.application_id,
+                    "candidates": candidates,
+                }
+        return {"session_id": None, "application_id": None, "candidates": []}
+    finally:
+        db.close()
+
+
 @router.get("/api/prefill-sessions/{session_id}")
 def get_prefill_session(session_id: str, request: Request):
     user = auth.current_user(request)
@@ -336,10 +408,29 @@ def save_session_answers(session_id: str, body: SaveAnswers, request: Request):
     user = auth.current_user(request)
     db = SessionLocal()
     try:
-        _owned_record(db, session_id, user.id)
+        record = _owned_record(db, session_id, user.id)
         saved = profile_answers.upsert_answers(db, user.id, body.answers)
+        # Reviewed is reviewed: the pending stash from this session (if
+        # any) has now been considered, so it must not be offered again.
+        if record.pending_candidates_json not in (None, "", "[]"):
+            record.pending_candidates_json = "[]"
+            db.commit()
         by_key = {a["key"]: a for a in saved}
         return {"saved": [by_key[a["key"]] for a in body.answers if a.get("key") in by_key]}
+    finally:
+        db.close()
+
+
+@router.post("/api/prefill-sessions/{session_id}/dismiss-candidates")
+def dismiss_candidates(session_id: str, request: Request):
+    """Drop a session's pending answer candidates without saving them."""
+    user = auth.current_user(request)
+    db = SessionLocal()
+    try:
+        record = _owned_record(db, session_id, user.id)
+        record.pending_candidates_json = "[]"
+        db.commit()
+        return {"dismissed": True}
     finally:
         db.close()
 
@@ -368,14 +459,45 @@ _KEY_VK = {
 }
 
 
-async def _dispatch_input(live: _Live, message: dict[str, Any]) -> None:
+async def _dispatch_input(live: _Live, message: dict[str, Any]) -> dict[str, Any] | None:
+    """Forward one client input message to the streamed page. Returns an
+    optional reply for the client (currently only clipboard text)."""
     cdp = live.cdp
     if cdp is None:
-        return
+        return None
     kind = message.get("type")
     live.last_activity = datetime.utcnow()
     try:
-        if kind == "mouse":
+        if kind == "insert-text":
+            # Paste-in: the screencast has no shared clipboard with the
+            # user's machine, so the client sends the text itself and CDP
+            # inserts it at the page's current focus/caret in one edit —
+            # the same end result as pasting into the focused field.
+            text = message.get("text") or ""
+            if text:
+                await cdp.send("Input.insertText", {"text": text[:10_000]})
+        elif kind == "copy-selection":
+            # Copy-out: there is no clipboard channel in a screencast, but
+            # the text the user selected in the streamed page can be read
+            # back and handed to the client, which puts it on the user's
+            # real clipboard. Only the current selection is reachable —
+            # arbitrary page content is not.
+            selected = ""
+            if live.page is not None:
+                for frame in live.page.frames:
+                    if formfill.CAPTCHA_RE.search(frame.url or ""):
+                        continue
+                    try:
+                        value = await frame.evaluate(
+                            "() => (window.getSelection ? window.getSelection().toString() : '')"
+                        )
+                    except Exception:
+                        continue
+                    if value and str(value).strip():
+                        selected = str(value)
+                        break
+            return {"type": "clipboard", "text": selected}
+        elif kind == "mouse":
             action = message.get("action")
             event_type = {"press": "mousePressed", "release": "mouseReleased", "move": "mouseMoved"}.get(action)
             if event_type:
@@ -520,7 +642,9 @@ async def stream_prefill_session(websocket: WebSocket, session_id: str):
                 except json.JSONDecodeError:
                     continue
                 if isinstance(message, dict):
-                    await _dispatch_input(live, message)
+                    reply = await _dispatch_input(live, message)
+                    if reply is not None:
+                        await websocket.send_text(json.dumps(reply))
         except WebSocketDisconnect:
             pass
         finally:

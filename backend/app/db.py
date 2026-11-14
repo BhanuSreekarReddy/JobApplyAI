@@ -31,6 +31,7 @@ _ADDED_COLUMNS = [
     ("companies", "user_id", "INTEGER"),
     ("profiles", "first_name", "VARCHAR DEFAULT ''"),
     ("profiles", "last_name", "VARCHAR DEFAULT ''"),
+    ("prefill_sessions", "pending_candidates_json", "TEXT DEFAULT '[]'"),
 ]
 
 
