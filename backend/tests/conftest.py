@@ -4,6 +4,10 @@ import tempfile
 # Must run before any `app` import: keeps tests away from the real data/ directory.
 os.environ["JOBAPPLY_DATA_DIR"] = tempfile.mkdtemp(prefix="jobapply-test-")
 os.environ["FORMFILL_HEADLESS"] = "true"
+# Pacing delays are scaled to zero so the suite stays fast; the paced
+# interaction pattern itself (clicks, real key events, visual order)
+# still runs, and the pacing math is unit-tested directly.
+os.environ["FORMFILL_PACING_SCALE"] = "0"
 os.environ["ADMIN_EMAILS"] = "admin@test.local"
 for key in ("OPENAI_API_KEY", "ADZUNA_APP_ID", "ADZUNA_APP_KEY", "USAJOBS_API_KEY", "SMTP_HOST"):
     os.environ[key] = ""

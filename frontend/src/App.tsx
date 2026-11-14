@@ -210,7 +210,16 @@ function Workspace({
       const res = await fetch("/api/prefill-sessions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ application_id: app.id }),
+        body: JSON.stringify({
+          application_id: app.id,
+          // This browser's own locale/timezone, so the streamed
+          // session's browser presents the same generic identity
+          // instead of the server's. The server validates both and
+          // stores neither — they configure the one session only.
+          client_timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || undefined,
+          client_language: navigator.language || undefined,
+          client_languages: navigator.languages ? Array.from(navigator.languages) : undefined,
+        }),
       });
       if (!res.ok) throw new Error(await res.text());
       const session = (await res.json()) as { id: string };

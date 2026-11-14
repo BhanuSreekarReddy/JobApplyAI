@@ -35,6 +35,13 @@ Hard rules:
   DELETED when the session closes. No cookies or logins persist server-side.
 - One active session per user.
 - Sessions idle for 30 minutes are closed automatically.
+- The session browser presents a generic, internally consistent
+  identity instead of automation defaults: locale and timezone come
+  from the connecting client (validated, with documented fallbacks),
+  the screen is a common desktop size, and the user agent is the
+  bundled browser's own with the headless marker removed. It is
+  configured at launch and discarded with the profile — nothing about
+  it is stored per user.
 """
 from __future__ import annotations
 
@@ -43,11 +50,14 @@ import base64
 import json
 import logging
 import queue
+import random
+import re
 import shutil
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, available_timezones
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
@@ -100,6 +110,148 @@ class _Live:
 
 
 _live: dict[str, _Live] = {}
+
+
+# --- The session browser's identity -------------------------------------
+# A fresh automation context announces itself: navigator.webdriver is
+# set, the user agent says HeadlessChrome, the timezone is the SERVER's
+# (UTC in most deployments) while the language claims en-US, and the
+# "screen" is exactly the viewport. Employer anti-spam systems score
+# exactly those inconsistencies. The session therefore launches with a
+# generic, internally consistent identity: the connecting client's own
+# locale and timezone (validated — anything implausible is ignored),
+# a common desktop screen size, and the bundled browser's own user
+# agent with the headless marker removed. All of it is launch-time
+# configuration for this one ephemeral session; none of it is written
+# to the database or kept after the session closes.
+
+# Fallbacks when the client reports nothing usable: a generic US
+# identity (US users are the product's home market).
+DEFAULT_LOCALE = "en-US"
+DEFAULT_TIMEZONE = "America/New_York"
+
+# Common desktop screen sizes; the viewport sits a browser-chrome
+# height below the screen, the way a maximized real browser reports it.
+_SCREEN_SIZES = [(1920, 1080), (1536, 864), (1440, 900), (1366, 768), (1280, 800)]
+_BROWSER_CHROME_PX = 120
+
+_LANGUAGE_RE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8}){0,3}$")
+_KNOWN_TIMEZONES: set[str] | None = None
+
+
+def _valid_timezone(value: Any) -> str | None:
+    """A client-reported timezone, or None when it is not a plausible
+    IANA name (unknown zone, junk string, wrong type)."""
+    global _KNOWN_TIMEZONES
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value or len(value) > 64:
+        return None
+    try:
+        if _KNOWN_TIMEZONES is None:
+            _KNOWN_TIMEZONES = available_timezones()
+        if value not in _KNOWN_TIMEZONES:
+            return None
+        ZoneInfo(value)
+    except Exception:
+        return None
+    return value
+
+
+def _valid_language(value: Any) -> str | None:
+    """A client-reported language tag, or None when it is not a
+    plausible BCP-47 tag."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value or len(value) > 35 or not _LANGUAGE_RE.match(value):
+        return None
+    return value
+
+
+def _client_languages(client_language: Any, client_languages: Any) -> list[str]:
+    """The session's language list: the client's reported languages,
+    validated and de-duplicated (primary first), or the default."""
+    out: list[str] = []
+    candidates: list[Any] = []
+    if isinstance(client_languages, (list, tuple)):
+        candidates.extend(client_languages)
+    if client_language:
+        candidates.insert(0, client_language)
+    for candidate in candidates:
+        valid = _valid_language(candidate)
+        if valid and valid not in out:
+            out.append(valid)
+        if len(out) >= 4:
+            break
+    return out or [DEFAULT_LOCALE]
+
+
+def _accept_language(languages: list[str]) -> str:
+    parts = []
+    for i, lang in enumerate(languages):
+        parts.append(lang if i == 0 else f"{lang};q={max(0.5, 1.0 - 0.1 * i):.1f}")
+    return ",".join(parts)
+
+
+def _session_context_options(
+    client_timezone: Any = None,
+    client_language: Any = None,
+    client_languages: Any = None,
+) -> dict[str, Any]:
+    """launch_persistent_context kwargs giving the session its generic
+    identity (everything except the user agent, which is read from the
+    browser itself — see _session_user_agent). Pure and unit-tested:
+    client values that fail validation fall back to the documented
+    defaults, never to server-local settings."""
+    languages = _client_languages(client_language, client_languages)
+    width, height = random.choice(_SCREEN_SIZES)
+    return {
+        "viewport": {"width": width, "height": height - _BROWSER_CHROME_PX},
+        "screen": {"width": width, "height": height},
+        "locale": languages[0],
+        "timezone_id": _valid_timezone(client_timezone) or DEFAULT_TIMEZONE,
+        "color_scheme": "light",
+        "extra_http_headers": {"Accept-Language": _accept_language(languages)},
+        # Without this, Chromium exposes navigator.webdriver — the
+        # loudest automation tell a page can check.
+        "args": ["--disable-blink-features=AutomationControlled"],
+    }
+
+
+def _normalize_user_agent(ua: str) -> str:
+    """The bundled browser's own user agent with the headless marker
+    removed. Engine and version tokens are untouched, so the string
+    still describes the real browser — only the mode flag goes."""
+    return ua.replace("HeadlessChrome", "Chrome")
+
+
+_DEFAULT_UA: str | None = None
+
+
+async def _session_user_agent(pw: Any) -> str | None:
+    """The normalized user agent for session contexts, read once per
+    process from the bundled browser itself (so it can never drift
+    from the real engine/version). None when the probe launch fails —
+    the session then keeps the browser's default agent rather than
+    failing to start."""
+    global _DEFAULT_UA
+    if _DEFAULT_UA is not None:
+        return _DEFAULT_UA
+    try:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            ua = await page.evaluate("() => navigator.userAgent")
+        finally:
+            await browser.close()
+    except Exception:
+        return None
+    if isinstance(ua, str) and ua:
+        _DEFAULT_UA = _normalize_user_agent(ua)
+        return _DEFAULT_UA
+    return None
 
 
 def _payload(record: PrefillSessionRecord) -> dict[str, Any]:
@@ -262,6 +414,13 @@ async def expire_idle_sessions() -> None:
 
 class CreateSession(BaseModel):
     application_id: int
+    # The connecting browser's own locale/timezone, used only to give
+    # this session a consistent identity (see _session_context_options).
+    # Session-scoped launch configuration — validated server-side and
+    # never stored.
+    client_timezone: str | None = None
+    client_language: str | None = None
+    client_languages: list[str] | None = None
 
 
 @router.post("/api/prefill-sessions")
@@ -320,10 +479,16 @@ async def create_prefill_session(body: CreateSession, request: Request):
             raise RuntimeError("Playwright is not installed on the server.")
         live.pw = await async_playwright().start()
         profile_dir.mkdir(parents=True, exist_ok=True)
+        context_options = _session_context_options(
+            body.client_timezone, body.client_language, body.client_languages
+        )
+        user_agent = await _session_user_agent(live.pw)
+        if user_agent:
+            context_options["user_agent"] = user_agent
         live.context = await live.pw.chromium.launch_persistent_context(
             str(profile_dir),
             headless=True,
-            viewport={"width": 1280, "height": 800},
+            **context_options,
         )
         page = live.context.pages[0] if live.context.pages else await live.context.new_page()
         live.page = page

@@ -25,6 +25,14 @@ class Settings(BaseSettings):
     usajobs_api_key: str = ""
     usajobs_user_agent: str = "JobApply/1.0"
     formfill_headless: bool = False
+    # Human pacing for the form filler (delays + interaction pattern that
+    # reads as a person typing rather than a script setting values).
+    # FORMFILL_HUMAN_PACING=false is the kill switch: the filler reverts
+    # to instant value-setting. FORMFILL_PACING_SCALE multiplies every
+    # pacing delay (tests set it to 0 to stay fast; the interaction
+    # pattern still runs, just without the wall-clock waits).
+    formfill_human_pacing: bool = True
+    formfill_pacing_scale: float = 1.0
     # Accounts / hosted mode. ADMIN_EMAILS is a comma-separated list; anyone
     # who registers with one of those addresses becomes an admin.
     admin_emails: str = ""
