@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from app.agent.formfill import _classify, _fill_field, _pick_years_option, _planned_value, _radio_option, _values
+from app.agent.formfill import _classify, _expectation, _fill_field, _pick_years_option, _planned_value, _radio_option, _values
 
 
 def field(label, type_="text", tag="input", name="", placeholder="", autocomplete=""):
@@ -107,6 +107,23 @@ def test_fill_field_reports_an_unselected_option_as_unfilled():
     frame = _FakeFrame(result=False)
     f = {**radio_field(["Yes", "No"]), "id": 7, "frame": frame}
     assert asyncio.run(_fill_field(f, "work_authorization", "Yes")) is False
+
+
+def test_expectation_scopes_the_verify_pass():
+    # Only fills whose result can be read back get one: selects and custom
+    # dropdowns must render the chosen option, plain inputs must still hold
+    # a value. Radios verify inside their own fill, file values cannot be
+    # read back, and locations verify inside their filler — all skip.
+    base = {"type": "text", "tag": "input", "combobox": False, "options": []}
+    assert _expectation(base, None, "anything") == ("nonempty", "")
+    assert _expectation({**base, "type": "radio"}, "work_authorization", "Yes") == ("skip", "")
+    assert _expectation({**base, "type": "file"}, "resume", "cv.pdf") == ("skip", "")
+    assert _expectation({**base, "combobox": True}, "location", "Newark, CA") == ("skip", "")
+    combo = {**base, "combobox": True}
+    assert _expectation(combo, "gender", "Female") == ("option", "Female")
+    assert _expectation({**combo, "_chosen_option": "Non-binary"}, "gender", "non-binary") == ("option", "Non-binary")
+    sel = {"type": "select", "tag": "select", "combobox": False, "options": ["Select", "Female", "Male"]}
+    assert _expectation(sel, None, "female") == ("option", "Female")
 
 
 def test_years_option_and_values():
