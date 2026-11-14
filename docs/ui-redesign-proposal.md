@@ -61,11 +61,13 @@ A search run takes minutes, and today it presents as an opaque queued state unti
 
 ## The screens
 
-The proposals above, drawn. Each screen gives today's state in one line, the proposed layout, and what changes. The wireframes are schematic — layout and hierarchy, not visual design.
+The proposals above, drawn. Each screen gives today's state in one line, the proposed layout, and what changes. The wireframes are schematic — layout and hierarchy, not visual design. Each is paired with a rendered mockup of the same screen (sample data throughout).
 
 ### Home — the "Needs you" inbox (Proposal 2)
 
 Today: the app opens on the Run form — the search inputs, not the user's pending decisions.
+
+![Home — Needs you inbox](ui-redesign-screens/home-needs-you.png)
 
 ```
 +------------------------------------------------------------------+
@@ -100,6 +102,8 @@ What changes:
 
 Today: results, the review queue, and the tracker are three lists across two tabs, and a job's card changes shape as it moves between them.
 
+![Jobs — one list, stage filters](ui-redesign-screens/jobs-pipeline.png)
+
 ```
 +------------------------------------------------------------------+
 |  JOBS                                                            |
@@ -126,6 +130,8 @@ What changes:
 
 Today: the card leads with the cover letter and a flat row of equally weighted buttons.
 
+![The job card](ui-redesign-screens/job-card.png)
+
 ```
 +------------------------------------------------------------------+
 |  Staff Software Engineer — Acme               [ 92 match ]       |
@@ -150,6 +156,8 @@ What changes:
 ### Find jobs — a panel, not the home page (Proposals 2, 5, and 7)
 
 Today: the run form is the home page (the Run tab), and a running search shows an opaque queued state until results land.
+
+![Find jobs — a panel, not the home page](ui-redesign-screens/find-jobs.png)
 
 ```
 +------------------------------------------------------------------+
@@ -178,6 +186,8 @@ What changes:
 ### Profile — answers coverage (Proposal 6)
 
 Today: Profile is a form of fields; answer-bank gaps surface only later, per application, as "Needs you" items on that application's form.
+
+![Profile — answers coverage](ui-redesign-screens/profile-coverage.png)
 
 ```
 +------------------------------------------------------------------+
