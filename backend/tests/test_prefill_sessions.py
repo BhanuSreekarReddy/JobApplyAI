@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 
 from app import auth, main
 from app.db import SessionLocal
-from app.models import Application, PrefillSessionRecord, Run, SeenJob, User
+from app.models import Application, PrefillSessionRecord, ProfileAnswer, Run, SeenJob, User
 
 PASSWORD = "TestPass123!"
 
@@ -297,3 +297,77 @@ def test_typed_characters_appear_once(type_form_server):
     nick = [c for c in candidates if "Nickname" in c["question"]]
     assert nick, f"no Nickname candidate in {candidates}"
     assert nick[0]["answer"] == "ab", f"typed 'ab', field holds {nick[0]['answer']!r}"
+
+
+RADIO_FORM_HTML = """<!doctype html>
+<html><body>
+<h1>Apply — Example Co</h1>
+<form action="/submit" method="post">
+  <div><label>Full name <input type="text" name="full_name"></label></div>
+  <div><label>Email <input type="email" name="email"></label></div>
+  <div><label>Phone <input type="tel" name="phone"></label></div>
+  <fieldset>
+    <legend>Are you authorized to work in the United States?</legend>
+    <label><input type="radio" name="auth" value="yes" required> Yes</label>
+    <label><input type="radio" name="auth" value="no" required> No</label>
+  </fieldset>
+  <button type="submit">Submit Application</button>
+</form>
+</body></html>"""
+
+RADIO_QUESTION = "Are you authorized to work in the United States?"
+
+
+@pytest.fixture(scope="module")
+def radio_form_server():
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = RADIO_FORM_HTML.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_address[1]}/apply"
+    server.shutdown()
+
+
+def _save_answer(user_id: int, key: str, question: str, answer: str) -> None:
+    with SessionLocal() as db:
+        db.add(ProfileAnswer(user_id=user_id, key=key, question=question, answer=answer))
+        db.commit()
+
+
+def test_session_selects_the_saved_radio_answer(radio_form_server):
+    """A stored answer bank entry selects the matching radio option during a
+    streamed pre-fill. The filler only reports the group as filled when the
+    option is actually checked in the page, so this is the real click."""
+    email = _unique_email("pfradio")
+    user_id = _make_user(email)
+    _save_answer(user_id, "work_authorization", RADIO_QUESTION, "Yes")
+    app_id = _make_application(user_id, radio_form_server)
+    with _logged_in(email) as client:
+        session = _create_session(client, app_id)
+        assert RADIO_QUESTION in session["filled"], session["filled"]
+        assert RADIO_QUESTION not in session["needs_attention"]
+        assert client.post(f"/api/prefill-sessions/{session['id']}/close").status_code == 200
+
+
+def test_session_leaves_a_radio_group_without_a_saved_answer(radio_form_server):
+    """No stored answer -> the group is never guessed; it stays highlighted
+    in needs_attention for the user to answer themselves."""
+    email = _unique_email("pfradiomissing")
+    user_id = _make_user(email)
+    app_id = _make_application(user_id, radio_form_server)
+    with _logged_in(email) as client:
+        session = _create_session(client, app_id)
+        assert RADIO_QUESTION not in session["filled"]
+        assert RADIO_QUESTION in session["needs_attention"], session["needs_attention"]
+        assert client.post(f"/api/prefill-sessions/{session['id']}/close").status_code == 200
