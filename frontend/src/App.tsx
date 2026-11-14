@@ -578,15 +578,24 @@ function Workspace({
               Allow approved applications to be emailed automatically (every application still
               needs your approval first; otherwise approvals stay as prepared packets)
             </label>
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={browserFill}
-                onChange={(e) => setBrowserFill(e.target.checked)}
-              />
-              Pre-fill employer application forms in a browser window. Nothing is submitted: you review
-              each tab, answer the highlighted questions, and click Submit yourself.
-            </label>
+            {hosted ? (
+              <p className="lede">
+                Pre-fill works per application here: each prepared application gets a “Fill form in
+                browser” button, which opens the employer's form already filled in a streamed
+                session. Nothing is ever submitted for you — you review each tab and click Submit
+                yourself.
+              </p>
+            ) : (
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={browserFill}
+                  onChange={(e) => setBrowserFill(e.target.checked)}
+                />
+                Pre-fill employer application forms in a browser window. Nothing is submitted: you review
+                each tab, answer the highlighted questions, and click Submit yourself.
+              </label>
+            )}
             <button className="primary" disabled={busy || !file}>
               {busy ? "Agent running…" : "Run agent"}
             </button>
