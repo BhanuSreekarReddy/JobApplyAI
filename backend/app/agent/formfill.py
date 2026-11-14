@@ -630,6 +630,38 @@ def shutdown_browser() -> None:
     _worker.shutdown()
 
 
+# Pages a local fill completed, keyed by packet key, with the values the
+# agent filled. The local browser keeps its tabs open after a fill, so the
+# answers the user then types by hand can be scanned back and offered for
+# saving into the answer bank — the same capture streamed sessions have.
+# Entries are replaced when the same packet is filled again.
+_filled_pages: dict[str, dict[str, Any]] = {}
+
+
+def _register_filled_page(packet_key: str, page: Any, filled_values: dict[str, str] | None) -> None:
+    if packet_key and page is not None:
+        _filled_pages[packet_key] = {"page": page, "filled_values": dict(filled_values or {})}
+
+
+def has_filled_page(packet_key: str) -> bool:
+    return packet_key in _filled_pages
+
+
+async def capture_local_candidates(packet_key: str) -> list[dict[str, Any]] | None:
+    """Answer-bank candidates from what the user typed into a locally
+    filled form after the agent finished. None when no live filled page
+    is registered for the packet (never filled, or the tab was closed)."""
+    entry = _filled_pages.get(packet_key)
+    if entry is None:
+        return None
+    try:
+        scanned = await _scan_form_values(entry["page"])
+    except Exception:
+        _filled_pages.pop(packet_key, None)
+        return None
+    return answer_candidates(scanned, entry["filled_values"])
+
+
 async def fill_application(
     *,
     profile: dict[str, Any],
@@ -654,7 +686,7 @@ async def fill_application(
     files = _packet_files(profile, cover, resume_path, packet_key)
     values = _values(profile, location, cover, files, answers)
     try:
-        return await _worker.call(asyncio.wait_for(_fill(url, values), FILL_TIMEOUT_S))
+        return await _worker.call(asyncio.wait_for(_fill(url, values, packet_key), FILL_TIMEOUT_S))
     except Exception as exc:
         reason = "timed out" if isinstance(exc, (asyncio.TimeoutError, TimeoutError)) else str(exc).splitlines()[0][:200]
         return {
@@ -664,14 +696,17 @@ async def fill_application(
         }
 
 
-async def _fill(url: str, values: dict[str, Any]) -> dict[str, str]:
+async def _fill(url: str, values: dict[str, Any], packet_key: str = "") -> dict[str, str]:
     ctx = await _worker.context()
     blank = [p for p in ctx.pages if p.url in ("about:blank", "chrome://newtab/")]
     page = blank[0] if blank else await ctx.new_page()
     await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
     await _settle(page)
     result = await _fill_open_page(page, values)
-    result.pop("_page", None)
+    active_page = result.pop("_page", None)
+    # Keep the filled tab reachable so the user's own answers on it can be
+    # captured for the answer bank later (see capture_local_candidates).
+    _register_filled_page(packet_key, active_page, result.get("filled_values"))
     return result
 
 

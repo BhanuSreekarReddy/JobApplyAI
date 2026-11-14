@@ -148,6 +148,11 @@ class PrefillSessionRecord(Base):
     status: Mapped[str] = mapped_column(String, default="starting")  # starting | filling | ready | closed | error
     filled_json: Mapped[str] = mapped_column(Text, default="[]")
     needs_attention_json: Mapped[str] = mapped_column(Text, default="[]")
+    # Answer-bank candidates captured from the form when the session ended
+    # before the user could review them (stream drop, idle timeout). They
+    # are only ever PENDING here: nothing enters the answer bank until the
+    # user confirms each item, exactly like an in-session capture.
+    pending_candidates_json: Mapped[str] = mapped_column(Text, default="[]")
     notes: Mapped[str] = mapped_column(Text, default="")
     profile_dir: Mapped[str] = mapped_column(String, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
