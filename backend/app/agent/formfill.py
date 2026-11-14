@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import BROWSER_PROFILE_DIR, UPLOAD_DIR, settings
+from . import pacing
 from .locations import US_STATES
 from .submission import watch_page_for_submission
 
@@ -278,6 +279,7 @@ SCAN_JS = r"""
         : [],
       combobox: el.getAttribute('role') === 'combobox' || el.hasAttribute('aria-autocomplete') || el.hasAttribute('list'),
       form: el.form ? Array.from(document.forms).indexOf(el.form) : -1,
+      pos: (() => { const r = el.getBoundingClientRect(); return [Math.round(r.top + window.scrollY), Math.round(r.left + window.scrollX)]; })(),
     };
     if (isChoice) groups.set(type + ':' + (el.name || label), field);
     fields.push(field);
@@ -859,7 +861,7 @@ async def _fill_open_page(page: Any, values: dict[str, Any]) -> dict[str, Any]:
     used: set[str] = set()
     filled_values: dict[str, str] = {}
     expected: dict[int, tuple[str, str]] = {}
-    for f in _application_form(fields):
+    for f in _visual_order(_application_form(fields)):
         kind = f["kind"]
         if kind in {"resume", "cover_file"} and kind in used:
             kind = None
@@ -868,6 +870,9 @@ async def _fill_open_page(page: Any, values: dict[str, Any]) -> dict[str, Any]:
         attempted = bool(value) and not (f["filled"] and f["type"] != "file")
         if attempted:
             try:
+                # A breath before each field, the way a person moves
+                # down a form (pacing.py; scaled to zero in tests).
+                await pacing.pause_between_fields()
                 ok = await _fill_field(f, fill_kind, value)
             except Exception:
                 ok = False
@@ -1018,7 +1023,7 @@ async def _settle(page: Any) -> None:
 async def _scan(page: Any) -> list[dict[str, Any]]:
     fields: list[dict[str, Any]] = []
     next_id = 0
-    for frame in page.frames:
+    for frame_seq, frame in enumerate(page.frames):
         if CAPTCHA_RE.search(frame.url or ""):
             continue
         try:
@@ -1028,6 +1033,7 @@ async def _scan(page: Any) -> list[dict[str, Any]]:
         next_id = res["next"]
         for f in res["fields"]:
             f["frame"] = frame
+            f["_frame_seq"] = frame_seq
             f["kind"] = _classify(f)
             f["answer_key"] = _classify_answer(f)
             fields.append(f)
@@ -1133,6 +1139,22 @@ def _application_form(fields: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Career pages often carry other forms (job alerts, newsletter, search); keep only the application."""
     groups = [g for g in _form_groups(fields) if _is_application(g)]
     return max(groups, key=_form_weight) if groups else []
+
+
+def _visual_order(fields: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Fields in the order a person works down the page: frame by frame,
+    then top-to-bottom and left-to-right within the frame, using the
+    document coordinates the scan recorded. The sort is stable, so
+    fields the scan could not position keep their scan order at the end
+    of their frame."""
+
+    def key(f: dict[str, Any]) -> tuple[int, float, float]:
+        pos = f.get("pos") or []
+        top = float(pos[0]) if len(pos) > 0 else float("inf")
+        left = float(pos[1]) if len(pos) > 1 else float("inf")
+        return (int(f.get("_frame_seq") or 0), top, left)
+
+    return sorted(fields, key=key)
 
 
 async def _click_apply(page: Any, tried: set[str]) -> Any:
@@ -1303,8 +1325,55 @@ async def _fill_field(f: dict[str, Any], kind: str, value: Any) -> bool:
         return await _fill_location(f, loc, str(value))
     if f["combobox"]:
         return await _fill_combobox(f, loc, str(value))
+    if pacing.enabled():
+        try:
+            await _type_like_a_person(loc, str(value), multiline=f["tag"] == "textarea")
+            return True
+        except Exception:
+            pass  # fall through to the instant set below
     await loc.fill(str(value), timeout=5_000)
     return True
+
+
+async def _type_like_a_person(loc: Any, value: str, *, multiline: bool) -> None:
+    """Enter a text value the way a person does: scroll the field into
+    view, click to focus, clear what's there, then type with real key
+    events at pacing.keystroke_delay_ms() per character (compressed for
+    long values). Raises when the value demonstrably did not land — a
+    controlled input that resets itself ends up empty — so the caller
+    can fall back to an instant set. Newlines become Enter keystrokes
+    only in a textarea; in a one-line input Enter could submit the
+    form, so they are typed as spaces (a browser does the same when
+    multi-line text is pasted into a one-line field)."""
+    await loc.scroll_into_view_if_needed(timeout=5_000)
+    await loc.click(timeout=5_000)
+    try:
+        await loc.fill("", timeout=2_000)
+    except Exception:
+        pass
+    if "\n" not in value and pacing.keystroke_delay_ms(len(value)) <= 0:
+        # Zero scale (the test suite): the delays are defined as zero,
+        # so the whole value goes in one sequential type — the same key
+        # events, batched into one call. The read-back below still
+        # guards the result. Values with newlines keep the per-character
+        # path so newline handling stays explicit.
+        await loc.press_sequentially(value, timeout=10_000)
+    else:
+        for ch in value:
+            if ch == "\n":
+                if multiline:
+                    await loc.press("Enter", timeout=2_000)
+                else:
+                    await loc.press_sequentially(" ", timeout=2_000)
+            else:
+                await loc.press_sequentially(ch, timeout=5_000)
+            delay = pacing.keystroke_delay_ms(len(value))
+            if delay > 0:
+                await asyncio.sleep(delay / 1000.0)
+    if value.strip():
+        landed = await loc.input_value(timeout=2_000)
+        if not (landed or "").strip():
+            raise ValueError("typed value did not land")
 
 
 async def _poll_combobox_choice(f: dict[str, Any], value: str) -> str | None:
@@ -1335,7 +1404,7 @@ async def _fill_combobox(f: dict[str, Any], loc: Any, value: str) -> bool:
         await frame.evaluate(COMBOBOX_JS, {"id": f["id"], "phase": "mark"})
         await loc.click(timeout=5_000)
         await loc.fill("", timeout=3_000)
-        await loc.press_sequentially(value, delay=40, timeout=10_000)
+        await loc.press_sequentially(value, delay=int(pacing.press_delay_ms(len(value))), timeout=10_000)
         chosen = await _poll_combobox_choice(f, value)
         if not chosen:
             # The typed filter can hide every option when the stored wording
@@ -1382,7 +1451,7 @@ async def _fill_location(f: dict[str, Any], loc: Any, value: str) -> bool:
     try:
         await frame.evaluate(SUGGEST_JS, {**args, "phase": "mark"})
         await loc.fill("", timeout=3_000)
-        await loc.press_sequentially(value, delay=40, timeout=10_000)
+        await loc.press_sequentially(value, delay=int(pacing.press_delay_ms(len(value))), timeout=10_000)
         ambiguous = 0
         for _ in range(24):
             await asyncio.sleep(0.25)
