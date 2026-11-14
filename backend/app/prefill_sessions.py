@@ -19,7 +19,12 @@ reads the session clipboard back (navigator.clipboard.readText), and
 returns the text for the client to place on the user's real clipboard.
 Copy/paste WITHIN the session (field to field, page to page) never
 leaves the session browser and is fully native, rich text included.
-Only plain text crosses the local<->session boundary. Each native route
+When the client has no local text to offer for a Ctrl+V (its paste
+event never fired and its async clipboard read came back empty or
+denied), it sends "paste-key" instead: the server dispatches the
+genuine Ctrl+V WITHOUT writing the session clipboard first, so the
+page pastes whatever the session browser itself holds. Only plain
+text crosses the local<->session boundary. Each native route
 has a fallback: paste degrades to CDP Input.insertText at the page's
 focus ("insert-text"), and copy degrades to reading the page's current
 selection ("copy-selection"). The older message names are kept for the
@@ -684,6 +689,25 @@ async def _dispatch_input(live: _Live, message: dict[str, Any]) -> dict[str, Any
                 else:
                     await cdp.send("Input.insertText", {"text": text})
             return {"type": "paste-result", "via": via}
+        elif kind == "paste-key":
+            # The client had no local text to offer for this Ctrl+V:
+            # its paste event never fired and its async clipboard read
+            # came back empty or was denied. The streamed page still
+            # gets its paste — a genuine Ctrl+V against the SESSION
+            # browser's own clipboard, which is what the user means when
+            # they copied inside the streamed page and paste into
+            # another of its fields. The session clipboard is
+            # deliberately NOT written first: overwriting it would
+            # destroy the very text being pasted. Without the native
+            # route there is nothing to paste with (insertText needs
+            # text the client could not supply), so say so.
+            if NATIVE_CLIPBOARD:
+                try:
+                    await _dispatch_ctrl_key(live, "v", "KeyV", 86)
+                    return {"type": "paste-result", "via": "native"}
+                except Exception:
+                    pass
+            return {"type": "paste-result", "via": "unavailable"}
         elif kind == "copy":
             # Native copy: a genuine Ctrl+C in the session page, with
             # the session clipboard read back for the client to place on

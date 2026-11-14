@@ -20,18 +20,22 @@ type SessionInfo = {
  * streamed page themselves.
  *
  * Copy/paste: keyboard-native, the way a local page behaves. Ctrl/Cmd+V
- * is captured from the browser's own paste event (the focused canvas is
- * the sink, so the clipboard text is available synchronously — no
- * permission prompt, no paste box) and forwarded to the server, which
- * puts it on the streamed browser's clipboard and dispatches a genuine
- * Ctrl+V there: the page sees a real paste event. Ctrl/Cmd+C asks the
- * server to dispatch a genuine Ctrl+C in the streamed page and read its
- * clipboard back; the returned text is written to this machine's
- * clipboard. Copy/paste inside the streamed page never leaves its
- * browser and is fully native. Only plain text crosses between the two
- * machines. If a browser won't play along, the server degrades paste to
- * direct text insertion and copy to reading the selection — automatically;
- * there are no clipboard controls in the UI by design.
+ * opens a paste gesture with up to three routes, first success wins:
+ * the browser's native paste event on the focused canvas (clipboard
+ * text synchronously, no permission prompt), the async clipboard API
+ * read from the keydown, and — when neither offers text — a request
+ * for the server to dispatch a genuine Ctrl+V inside the streamed
+ * page, which pastes the streamed browser's OWN clipboard (that is
+ * what makes copy/paste within the page work when this machine's
+ * clipboard can't be read). Text from this machine is forwarded to the
+ * server, which puts it on the streamed browser's clipboard and
+ * dispatches a genuine Ctrl+V there: the page sees a real paste event.
+ * Ctrl/Cmd+C asks the server to dispatch a genuine Ctrl+C in the
+ * streamed page and read its clipboard back; the returned text is
+ * written to this machine's clipboard. Only plain text crosses between
+ * the two machines. If a browser won't play along, the server degrades
+ * paste to direct text insertion and copy to reading the selection —
+ * automatically; there are no clipboard controls in the UI by design.
  */
 export default function PrefillView({
   sessionId,
@@ -44,6 +48,12 @@ export default function PrefillView({
   const wsRef = useRef<WebSocket | null>(null);
   const wheelAcc = useRef<{ x: number; y: number; deltaX: number; deltaY: number } | null>(null);
   const wheelRaf = useRef<number | null>(null);
+  // The open paste gesture (one per Ctrl/Cmd+V): routes race to close
+  // it — "text" once this machine's clipboard text has been forwarded,
+  // "key" once the server has been asked to paste the streamed page
+  // from its own clipboard. A closed gesture ignores late routes, so
+  // one keypress pastes exactly once.
+  const pasteGestureRef = useRef<{ id: number; phase: "pending" | "text" | "key" } | null>(null);
   const [info, setInfo] = useState<SessionInfo | null>(null);
   const [streamState, setStreamState] = useState<"connecting" | "live" | "closed" | "error">(
     "connecting",
@@ -81,7 +91,9 @@ export default function PrefillView({
             setClipNote(
               data.via === "native"
                 ? "Pasted into the form."
-                : "Pasted into the form (basic mode — the native paste route wasn't available).",
+                : data.via === "unavailable"
+                  ? "Couldn't paste — the streamed browser couldn't use its clipboard."
+                  : "Pasted into the form (basic mode — the native paste route wasn't available).",
             );
           }
         } catch {
@@ -224,6 +236,44 @@ export default function PrefillView({
     send({ type: "copy" });
   }
 
+  // Forward this machine's clipboard text for one paste gesture. The
+  // native paste event and the async clipboard read can both answer
+  // for the same keypress; this gate lets only the first one through,
+  // so the text is inserted exactly once.
+  function deliverPaste(text: string, gesture: number) {
+    if (!text) return;
+    const state = pasteGestureRef.current;
+    if (!state || state.id !== gesture || state.phase !== "pending") return;
+    state.phase = "text";
+    setClipNote("");
+    send({ type: "paste", text });
+  }
+
+  // Open the gesture for one Ctrl/Cmd+V. The keydown itself must not be
+  // prevented (that would suppress the browser's paste event), so the
+  // routes race instead: the paste event, the async clipboard read
+  // started here, and a short timer — if neither produced text, the
+  // server is asked to paste inside the streamed page from its own
+  // clipboard ("paste-key"), which covers copy/paste within the page
+  // and browsers whose paste event or clipboard read never answers.
+  function beginPasteGesture() {
+    const gesture = (pasteGestureRef.current?.id ?? 0) + 1;
+    pasteGestureRef.current = { id: gesture, phase: "pending" };
+    if (navigator.clipboard?.readText) {
+      navigator.clipboard
+        .readText()
+        .then((text) => deliverPaste(text, gesture))
+        .catch(() => undefined);
+    }
+    window.setTimeout(() => {
+      const state = pasteGestureRef.current;
+      if (state && state.id === gesture && state.phase === "pending") {
+        state.phase = "key";
+        send({ type: "paste-key" });
+      }
+    }, 400);
+  }
+
   async function fetchCandidates(): Promise<AnswerCandidate[] | null> {
     const res = await fetch(`/api/prefill-sessions/${sessionId}/answer-candidates`, {
       method: "POST",
@@ -361,8 +411,19 @@ export default function PrefillView({
           background: "#fff",
         }}
         onMouseDown={(e) => {
-          canvasRef.current?.focus();
-          send({ type: "mouse", action: "press", ...point(e), button: "left" });
+          // Map the click BEFORE focusing the canvas: focusing scrolls
+          // the page so the canvas fits the viewport, and point() reads
+          // the bounding rect — pre-scroll client coordinates against
+          // the post-scroll rect put every click a full scroll-delta
+          // too low in the streamed page, so fields never actually
+          // received focus and typing/paste had nowhere to land.
+          const p = point(e);
+          try {
+            canvasRef.current?.focus({ preventScroll: true });
+          } catch {
+            canvasRef.current?.focus();
+          }
+          send({ type: "mouse", action: "press", ...p, button: "left" });
         }}
         onMouseUp={(e) => send({ type: "mouse", action: "release", ...point(e), button: "left" })}
         onMouseMove={(e) => {
@@ -372,12 +433,16 @@ export default function PrefillView({
           const mod = e.ctrlKey || e.metaKey;
           if (mod && e.key.toLowerCase() === "v") {
             // Paste: do NOT preventDefault and do NOT forward the
-            // keystroke. The browser must be allowed to fire its native
-            // paste event on this focused canvas — preventDefault here
-            // would suppress it — and onPaste forwards the clipboard
-            // text to the server, which performs a genuine paste inside
-            // the streamed page. Forwarding the bare keystroke would
-            // race that with the session browser's own clipboard.
+            // keystroke — the browser must be allowed to fire its
+            // native paste event on this focused canvas (preventDefault
+            // here would suppress it), and forwarding the bare
+            // keystroke would race the bridged paste with the session
+            // browser's own clipboard. Instead, open a paste gesture:
+            // the paste event and an async clipboard read race to
+            // supply this machine's text, and if neither answers, the
+            // server pastes inside the streamed page from its own
+            // clipboard.
+            beginPasteGesture();
             return;
           }
           if (mod && e.key.toLowerCase() === "c") {
@@ -427,14 +492,21 @@ export default function PrefillView({
         onPaste={(e) => {
           // The browser's native paste event: this machine's clipboard
           // text, available synchronously because the canvas is focused.
-          // The server turns it into a genuine paste in the streamed
-          // page (its clipboard + a real Ctrl+V), falling back to plain
-          // insertion only if that route is unavailable there.
+          // Attribute it to the gesture the keydown just opened; a
+          // paste with no keydown (a menu paste) opens its own gesture
+          // so it is never swallowed by a stale one. deliverPaste
+          // dedupes against the gesture's async clipboard read, so the
+          // text is forwarded exactly once.
           const text = e.clipboardData.getData("text");
           if (text) {
             e.preventDefault();
-            setClipNote("");
-            send({ type: "paste", text });
+            let state = pasteGestureRef.current;
+            if (!state || state.phase !== "pending") {
+              const gesture = (state?.id ?? 0) + 1;
+              pasteGestureRef.current = { id: gesture, phase: "pending" };
+              state = pasteGestureRef.current;
+            }
+            deliverPaste(text, state.id);
           }
         }}
       />
