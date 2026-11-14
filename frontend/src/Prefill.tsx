@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import AnswerCandidatesPanel, { AnswerCandidate } from "./AnswerCandidates";
 
 type SessionInfo = {
   id: string;
@@ -10,14 +11,6 @@ type SessionInfo = {
   notes: string;
 };
 
-type AnswerCandidate = {
-  key: string;
-  question: string;
-  answer: string;
-  sensitive: boolean;
-  selected: boolean;
-};
-
 /**
  * Live streamed pre-fill session. The server runs the employer's form in an
  * ephemeral browser profile and streams it here over a WebSocket (CDP
@@ -25,6 +18,13 @@ type AnswerCandidate = {
  * forwarded back. The profile is wiped server-side when the session closes,
  * and nothing is submitted by the agent — the user clicks Submit in the
  * streamed page themselves.
+ *
+ * Copy/paste: a screencast shares no clipboard with this machine, so paste
+ * travels as text (the client sends it; the server inserts it at the
+ * form's focus) and copy reads the streamed page's current selection back
+ * onto this machine's clipboard. Only the selection is reachable — there
+ * is no channel to arbitrary page content or the server browser's own
+ * clipboard.
  */
 export default function PrefillView({
   sessionId,
@@ -43,8 +43,12 @@ export default function PrefillView({
   );
   const [closing, setClosing] = useState(false);
   const [candidates, setCandidates] = useState<AnswerCandidate[] | null>(null);
+  const [pendingClose, setPendingClose] = useState(false);
   const [answersBusy, setAnswersBusy] = useState(false);
   const [answersNote, setAnswersNote] = useState("");
+  const [pasteText, setPasteText] = useState("");
+  const [copiedText, setCopiedText] = useState("");
+  const [clipNote, setClipNote] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -61,6 +65,17 @@ export default function PrefillView({
     wsRef.current = ws;
     ws.onopen = () => setStreamState("live");
     ws.onmessage = (msg) => {
+      if (typeof msg.data === "string") {
+        // Text messages are control replies (clipboard text read back from
+        // the streamed page); binary messages are screencast frames.
+        try {
+          const data = JSON.parse(msg.data) as { type?: string; text?: string };
+          if (data.type === "clipboard") void receiveCopiedText(data.text || "");
+        } catch {
+          /* not a control message */
+        }
+        return;
+      }
       if (!(msg.data instanceof Blob)) return;
       void (async () => {
         const bmp = await createImageBitmap(msg.data as Blob);
@@ -154,19 +169,52 @@ export default function PrefillView({
     }
   }
 
+  // Copy-out: the server reads the streamed page's current selection and
+  // sends it back; put it on this machine's clipboard. If the browser
+  // refuses the programmatic write (no fresh user gesture), show the text
+  // in a box the user can copy with a real keystroke instead.
+  async function receiveCopiedText(text: string) {
+    if (!text) {
+      setClipNote("Nothing is selected in the form — select text there first, then copy.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedText("");
+      setClipNote("Copied from the form to your clipboard.");
+    } catch {
+      setCopiedText(text);
+      setClipNote("Your browser blocked automatic copying — the text is in the box below, copy it from there.");
+    }
+  }
+
+  function requestCopySelection() {
+    setClipNote("");
+    send({ type: "copy-selection" });
+  }
+
+  // Paste-in: the screencast shares no clipboard with this machine, so the
+  // text is sent to the server, which inserts it at the form's focus.
+  function pasteIntoForm(text: string) {
+    if (!text) return;
+    send({ type: "insert-text", text });
+    setClipNote("Pasted into the form at the cursor.");
+  }
+
+  async function fetchCandidates(): Promise<AnswerCandidate[] | null> {
+    const res = await fetch(`/api/prefill-sessions/${sessionId}/answer-candidates`, {
+      method: "POST",
+    });
+    if (!res.ok) throw new Error(`Request failed (${res.status})`);
+    const data = (await res.json()) as { candidates: AnswerCandidate[] };
+    return data.candidates;
+  }
+
   async function loadCandidates() {
     setAnswersBusy(true);
     setAnswersNote("");
     try {
-      const res = await fetch(`/api/prefill-sessions/${sessionId}/answer-candidates`, {
-        method: "POST",
-      });
-      if (!res.ok) throw new Error(`Request failed (${res.status})`);
-      const data = (await res.json()) as {
-        candidates: Omit<AnswerCandidate, "selected">[];
-      };
-      // Sensitive (EEO/demographic) answers are opt-in: unchecked by default.
-      setCandidates(data.candidates.map((c) => ({ ...c, selected: !c.sensitive })));
+      setCandidates(await fetchCandidates());
     } catch {
       setAnswersNote("Could not read the form's answers right now.");
     } finally {
@@ -174,9 +222,32 @@ export default function PrefillView({
     }
   }
 
-  async function saveSelectedAnswers() {
-    if (!candidates) return;
-    const chosen = candidates.filter((c) => c.selected);
+  // Closing used to throw away everything the user typed unless they had
+  // pressed "Save answers" first. Now closing captures first: if there
+  // are unsaved answers, the save panel appears and the user chooses —
+  // save and close, or close without saving.
+  async function requestClose() {
+    if (candidates) return; // the save panel is showing; its buttons decide
+    if (streamState === "live") {
+      setAnswersBusy(true);
+      try {
+        const found = await fetchCandidates();
+        if (found && found.length) {
+          setCandidates(found);
+          setPendingClose(true);
+          setAnswersBusy(false);
+          return;
+        }
+      } catch {
+        /* capture is best-effort at close; the session still closes */
+      } finally {
+        setAnswersBusy(false);
+      }
+    }
+    await closeSession();
+  }
+
+  async function saveSelectedAnswers(chosen: AnswerCandidate[]) {
     setAnswersBusy(true);
     try {
       const res = await fetch(`/api/prefill-sessions/${sessionId}/save-answers`, {
@@ -194,6 +265,10 @@ export default function PrefillView({
           ? `Saved ${data.saved.length} answer(s) to your profile — future applications will reuse them.`
           : "Nothing was saved.",
       );
+      if (pendingClose) {
+        setPendingClose(false);
+        await closeSession();
+      }
     } catch {
       setAnswersNote("Saving failed — your answers are still on the form, nothing was lost.");
     } finally {
@@ -271,6 +346,21 @@ export default function PrefillView({
           if (e.buttons) send({ type: "mouse", action: "move", ...point(e), button: "left" });
         }}
         onKeyDown={(e) => {
+          const mod = e.ctrlKey || e.metaKey;
+          if (mod && e.key.toLowerCase() === "v") {
+            // Paste: the browser fires a paste event carrying this
+            // machine's clipboard text; onPaste forwards it for insertion
+            // into the streamed page. Forwarding the bare Ctrl+V keystroke
+            // instead would paste the SERVER browser's (empty) clipboard.
+            e.preventDefault();
+            return;
+          }
+          if (mod && e.key.toLowerCase() === "c") {
+            // Mirror the selection to this machine's clipboard. The
+            // keystroke itself is still forwarded below, so copy/paste
+            // within the streamed page keeps working too.
+            requestCopySelection();
+          }
           // Full keystrokes, not bare characters: the streamed page's own
           // keydown handlers (segmented one-time-code boxes especially) need
           // a real key event with a virtual key code, or entered digits
@@ -289,6 +379,10 @@ export default function PrefillView({
           e.preventDefault();
         }}
         onKeyUp={(e) => {
+          if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "v") {
+            e.preventDefault();
+            return;
+          }
           send({
             type: "key",
             action: "up",
@@ -299,75 +393,71 @@ export default function PrefillView({
               (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0),
           });
         }}
+        onPaste={(e) => {
+          const text = e.clipboardData.getData("text");
+          if (text) {
+            e.preventDefault();
+            pasteIntoForm(text);
+          }
+        }}
       />
       <p className="hint">
         Click the form to focus it, then type and click as usual — including the site's own
-        Submit button when you are ready.
+        Submit button when you are ready. Copy and paste work too: Ctrl+C copies the text you
+        selected in the form to your own clipboard, and Ctrl+V pastes your clipboard into the
+        focused field. If a paste doesn't land, use the box below.
       </p>
+      <div className="row" style={{ marginBottom: 12 }}>
+        <input
+          type="text"
+          placeholder="Text to paste into the form…"
+          value={pasteText}
+          onChange={(e) => setPasteText(e.target.value)}
+          style={{ flex: 1 }}
+        />
+        <button
+          className="ghost"
+          disabled={streamState !== "live" || !pasteText}
+          onClick={() => {
+            pasteIntoForm(pasteText);
+            setPasteText("");
+          }}
+        >
+          Paste into form
+        </button>
+        <button className="ghost" disabled={streamState !== "live"} onClick={requestCopySelection}>
+          Copy selected text
+        </button>
+      </div>
+      {copiedText ? (
+        <input
+          type="text"
+          readOnly
+          value={copiedText}
+          onFocus={(e) => e.target.select()}
+          style={{ width: "100%", marginBottom: 12 }}
+          aria-label="Text copied from the form"
+        />
+      ) : null}
+      {clipNote ? <p className="meta">{clipNote}</p> : null}
       {candidates ? (
-        <div style={{ marginBottom: 12 }}>
-          <h3>Save answers from this form</h3>
-          {candidates.length ? (
-            <>
-              <p className="meta">
-                These are answers you typed yourself. Checked ones are saved to your profile and
-                reused on future applications. Sensitive questions (EEO/demographic) are left
-                unchecked — tick one only if you want it stored. One-time codes and passwords
-                are never saved.
-              </p>
-              {candidates.map((c) => (
-                <label
-                  key={c.key}
-                  style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 6 }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={c.selected}
-                    onChange={(e) =>
-                      setCandidates((list) =>
-                        list
-                          ? list.map((x) =>
-                              x.key === c.key ? { ...x, selected: e.target.checked } : x,
-                            )
-                          : list,
-                      )
-                    }
-                  />
-                  <span>
-                    <strong>{c.question}</strong>
-                    {c.sensitive ? " (sensitive)" : ""} — {c.answer}
-                  </span>
-                </label>
-              ))}
-              <div className="row">
-                <button
-                  className="primary"
-                  disabled={answersBusy}
-                  onClick={() => void saveSelectedAnswers()}
-                >
-                  Save selected answers
-                </button>
-                <button
-                  className="ghost"
-                  disabled={answersBusy}
-                  onClick={() => setCandidates(null)}
-                >
-                  Cancel
-                </button>
-              </div>
-            </>
-          ) : (
-            <>
-              <p className="meta">
-                Nothing new to save — everything with a value on this form was filled by the
-                agent, and the rest is still empty.
-              </p>
-              <button className="ghost" onClick={() => setCandidates(null)}>
-                Dismiss
-              </button>
-            </>
-          )}
-        </div>
+        <>
+          <h3>{pendingClose ? "Save your answers before closing?" : "Save answers from this form"}</h3>
+          <AnswerCandidatesPanel
+            candidates={candidates}
+            busy={answersBusy}
+            saveLabel={pendingClose ? "Save selected & close" : "Save selected answers"}
+            dismissLabel={pendingClose ? "Close without saving" : "Cancel"}
+            onSave={(chosen) => void saveSelectedAnswers(chosen)}
+            onDismiss={() => {
+              setCandidates(null);
+              if (pendingClose) {
+                setPendingClose(false);
+                void closeSession();
+              }
+            }}
+          />
+        </>
       ) : null}
       {answersNote ? <p className="notice ok">{answersNote}</p> : null}
       <div className="row">
@@ -378,7 +468,7 @@ export default function PrefillView({
         >
           {answersBusy ? "Working…" : "Save answers from this form"}
         </button>
-        <button className="primary" disabled={closing} onClick={() => void closeSession()}>
+        <button className="primary" disabled={closing} onClick={() => void requestClose()}>
           {closing ? "Closing…" : "Close session"}
         </button>
       </div>

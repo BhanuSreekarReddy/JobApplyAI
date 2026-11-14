@@ -16,9 +16,10 @@ from pydantic import BaseModel
 
 from . import answers as profile_answers
 from . import auth, events
+from .profile_source import fill_profile
 from .agent.apply import apply_to_job
 from .agent.companies import ResolveError, add_company, payload as company_payload, resolve_job_url, sync_starter
-from .agent.formfill import fill_application, shutdown_browser
+from .agent.formfill import capture_local_candidates, fill_application, shutdown_browser
 from .agent.materials import cover_letter
 from .agent.profile import heuristic_profile, split_name
 from .agent.resume import extract_text
@@ -1015,10 +1016,9 @@ async def fill_application_form(app_id: int, request: Request):
         job = db.get(JobMatch, row.job_id)
         if not run:
             raise HTTPException(404, "Run not found")
-        try:
-            profile = json.loads(run.profile_json or "{}")
-        except json.JSONDecodeError:
-            profile = {}
+        # The user's saved profile wins over the run's snapshot, so edits
+        # made on the profile page reach this fill.
+        profile = fill_profile(db, user.id, run)
         result = await fill_application(
             profile=profile,
             job={
@@ -1042,6 +1042,37 @@ async def fill_application_form(app_id: int, request: Request):
         return _app_payload(row)
     finally:
         db.close()
+
+
+@app.post("/api/applications/{app_id}/answer-candidates")
+async def local_answer_candidates(app_id: int, request: Request):
+    """Answers the user typed into a locally filled form, offered for
+    saving into their answer bank. The local browser keeps the filled tab
+    open after a fill; this scans it back and diffs against what the
+    agent filled, exactly like a streamed session's capture. Nothing is
+    saved by this endpoint — the client shows the candidates and the user
+    picks which ones to keep (PUT /api/profile/answers)."""
+    user = auth.current_user(request)
+    if settings.jobapply_hosted:
+        raise HTTPException(
+            400,
+            "In hosted mode, answers are captured from the streamed pre-fill "
+            "session instead (Save answers in the session view).",
+        )
+    db = SessionLocal()
+    try:
+        row = _owned_application(db, user, app_id)
+        packet_key = f"{row.run_id}-{row.job_id}"
+    finally:
+        db.close()
+    candidates = await capture_local_candidates(packet_key)
+    if candidates is None:
+        raise HTTPException(
+            409,
+            "No filled form is open for this application. Fill the form in "
+            "the browser first, type your answers, then capture them here.",
+        )
+    return {"candidates": candidates}
 
 
 class ApplicationUpdate(BaseModel):
@@ -1107,12 +1138,9 @@ async def approve_application(app_id: int, request: Request):
         if app.status != "pending_review":
             raise HTTPException(400, "Only applications waiting for review can be approved")
         run = db.get(Run, app.run_id)
-        profile = {}
-        if run:
-            try:
-                profile = json.loads(run.profile_json or "{}")
-            except json.JSONDecodeError:
-                profile = {}
+        # The user's saved profile wins over the run's snapshot, so edits
+        # made on the profile page reach this approval and its fill.
+        profile = fill_profile(db, user.id, run)
         job_row = db.get(JobMatch, app.job_id) if app.job_id else None
         result = apply_to_job(
             profile=profile,
@@ -1300,7 +1328,9 @@ async def apply_from_link(body: JobLink, request: Request):
         run = _profile_run(db, body.run_id, user.id)
         if not run:
             raise HTTPException(409, "Run the agent once with your resume first, so the app knows your profile.")
-        profile = json.loads(run.profile_json or "{}")
+        # The user's saved profile wins over the run's snapshot, so edits
+        # made on the profile page reach this packet and its fill.
+        profile = fill_profile(db, user.id, run)
         async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
             try:
                 job = await resolve_job_url(client, body.url)
