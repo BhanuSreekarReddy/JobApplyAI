@@ -24,7 +24,7 @@ from .agent.materials import cover_letter
 from .agent.profile import heuristic_profile, split_name
 from .agent.resume import extract_text
 from .agent.runner import execute_run, primary_location, _app_payload, _job_payload, _public_profile, _upsert_profile
-from .agent.seen import advance_stage_on_submission, record_application_seen
+from .agent.seen import advance_stage_on_submission, mark_application_submitted, record_application_seen
 from .config import UPLOAD_DIR, cors_origin_list, settings
 from .db import Base, SessionLocal, engine, upgrade_schema
 from .models import (
@@ -1091,14 +1091,24 @@ def update_application(app_id: int, body: ApplicationUpdate, request: Request):
                 raise HTTPException(400, "Only applications waiting for review can be edited")
             row.cover_letter = body.cover_letter
         if body.status is not None:
-            row.status = body.status
-            if body.status == "applied":
-                row.notes = "Submitted by you on the employer site. " + (row.notes or "")
-        db.commit()
-        db.refresh(row)
-        if body.status is not None:
             job_row = db.get(JobMatch, row.job_id) if row.job_id else None
-            _record_application_seen(db, row, job_row, body.status)
+            if body.status == "applied":
+                # The one shared submission path: an employer
+                # confirmation detected on a filled page goes through
+                # exactly this function too (agent.submission).
+                if not mark_application_submitted(db, row, job_row):
+                    # Already applied: a no-op for the status, but a
+                    # cover-letter edit in the same request still saves.
+                    db.commit()
+                    db.refresh(row)
+            else:
+                row.status = body.status
+                db.commit()
+                db.refresh(row)
+                _record_application_seen(db, row, job_row, body.status)
+        else:
+            db.commit()
+            db.refresh(row)
         return _app_payload(row)
     finally:
         db.close()
